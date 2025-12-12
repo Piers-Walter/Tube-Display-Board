@@ -231,6 +231,14 @@ void setup()
   lv_display_set_buffers(disp, draw_buf, NULL, sizeof(draw_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_rotation(disp, TFT_ROTATION);
 
+#if 0
+  // Set default theme
+  lv_color_t color_primary = lv_palette_main(LV_PALETTE_BLUE);
+  lv_color_t color_secondary = lv_palette_main(LV_PALETTE_RED);
+  lv_theme_t * theme = lv_theme_default_init(NULL, color_primary, color_secondary, LV_THEME_DEFAULT_DARK, LV_FONT_DEFAULT);
+  lv_disp_set_theme(disp, theme);
+#endif
+
   // Initialize touch input
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
