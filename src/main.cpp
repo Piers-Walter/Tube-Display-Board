@@ -141,7 +141,7 @@ void relay_gui(void)
   lv_obj_set_size(btn1, 300, 75);
   label = lv_label_create(btn1);
   lv_obj_set_style_text_font(label, &lv_font_montserrat_48, 0);
-  lv_label_set_text(label, "Relais 1");
+  lv_label_set_text(label, "Relay 1");
   lv_obj_center(label);
 
   // Create relay 2 button
@@ -152,7 +152,7 @@ void relay_gui(void)
   lv_obj_set_size(btn2, 300, 75);
   label = lv_label_create(btn2);
   lv_obj_set_style_text_font(label, &lv_font_montserrat_48, 0);
-  lv_label_set_text(label, "Relais 2");
+  lv_label_set_text(label, "Relay 2");
   lv_obj_center(label);
 
   // Create relay 3 button
@@ -163,7 +163,7 @@ void relay_gui(void)
   lv_obj_set_size(btn3, 300, 75);
   label = lv_label_create(btn3);
   lv_obj_set_style_text_font(label, &lv_font_montserrat_48, 0);
-  lv_label_set_text(label, "Relais 3");
+  lv_label_set_text(label, "Relay 3");
   lv_obj_center(label);
 }
 
