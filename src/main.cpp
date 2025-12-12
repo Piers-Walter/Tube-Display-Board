@@ -25,6 +25,7 @@ lv_display_t *display;
 #define TFT_HOR_RES   480
 #define TFT_VER_RES   480
 #define TFT_ROTATION  LV_DISPLAY_ROTATION_0
+#define TFT_BRIGHTNESS 255  // Backlight brightness (0-255)
 
 // LVGL draw buffer: 1/10 screen size usually works well (size is in bytes)
 #define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
@@ -199,7 +200,7 @@ void setup()
   // Turn on backlight
 #ifdef GFX_BL
   pinMode(GFX_BL, OUTPUT);
-  digitalWrite(GFX_BL, HIGH);
+  analogWrite(GFX_BL, TFT_BRIGHTNESS);
 #endif
 
   // Display startup screen
