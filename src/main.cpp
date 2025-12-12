@@ -42,7 +42,7 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
   uint32_t h = (area->y2 - area->y1 + 1);
 
 #if (LV_COLOR_16_SWAP != 0)
-  gfx->draw16bitBeRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
+  gfx->draw16bitBeRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
 #else
   gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
 #endif
