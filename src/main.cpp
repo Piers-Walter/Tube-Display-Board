@@ -209,6 +209,7 @@ void setup()
   gfx->setTextColor(BLUE);
   gfx->setTextSize(6 /* x scale */, 6 /* y scale */, 2 /* pixel_margin */);
   gfx->println("Starting...");
+  gfx->setRotation((4 - TFT_ROTATION) % 4); // Adjust rotation for Arduino_GFX
 
   // Initialize LVGL
   lv_init();
@@ -221,6 +222,7 @@ void setup()
   disp = lv_display_create(TFT_HOR_RES, TFT_VER_RES);
   lv_display_set_flush_cb(disp, my_disp_flush);
   lv_display_set_buffers(disp, draw_buf, NULL, sizeof(draw_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_rotation(disp, TFT_ROTATION);
 
   // Initialize touch input
   lv_indev_t *indev = lv_indev_create();
