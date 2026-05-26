@@ -7,6 +7,8 @@
 #include <ESP32_4848S040.h>
 #include <lvgl.h>
 #include "touch.h"
+#include <WiFi.h>
+#include <Preferences.h>
 
 // ── Hardware ────────────────────────────────────────────────────────────────
 #define GFX_BL         38
@@ -122,11 +124,19 @@ static int16_t    g_cont_start_x    = 0;
 static lv_obj_t  *g_page_dots[8]    = {};
 
 // ── UI refs ────────────────────────────────────────────────────────────────
-typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS } ScreenType;
+typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG } ScreenType;
 
 static lv_obj_t *g_time_lbl          = nullptr;  // updated by clock timer
 static lv_obj_t *g_toggle_track[NUM_LINES] = {};
 static lv_obj_t *g_toggle_knob[NUM_LINES]  = {};
+
+// WiFi config state
+static char      g_wifi_ssid[64]     = "";
+static char      g_wifi_password[64] = "";
+static lv_obj_t *g_wifi_keyboard     = nullptr;
+static lv_obj_t *g_ssid_ta           = nullptr;
+static lv_obj_t *g_pwd_ta            = nullptr;
+static lv_obj_t *g_wifi_status_lbl   = nullptr;
 
 // ── Forward declarations ────────────────────────────────────────────────
 static void navigate_to(ScreenType type, int line_idx = 0);
@@ -463,7 +473,8 @@ static void build_home(lv_obj_t *scr) {
 }
 
 // ── Detail screen ─────────────────────────────────────────────────────────
-static void back_to_home(lv_event_t *) { navigate_to(SCREEN_HOME); }
+static void back_to_home(lv_event_t *)     { navigate_to(SCREEN_HOME); }
+static void back_to_settings(lv_event_t *) { navigate_to(SCREEN_SETTINGS); }
 
 static void build_detail(lv_obj_t *scr, int idx) {
     const LineInfo   &L    = LINES[idx];
@@ -569,13 +580,13 @@ static void settings_none_cb(lv_event_t *) {
     for (int i = 0; i < NUM_LINES; i++) { line_enabled[i] = false; refresh_toggle(i); }
 }
 
-static void build_settings(lv_obj_t *scr) {
+static void build_settings_lines(lv_obj_t *scr) {
     for (int i = 0; i < NUM_LINES; i++) g_toggle_track[i] = g_toggle_knob[i] = nullptr;
 
     // Header
     lv_obj_t *hdr  = build_header(scr);
     lv_obj_t *bbtn = build_back_btn(hdr);
-    lv_obj_add_event_cb(bbtn, back_to_home, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(bbtn, back_to_settings, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *tlbl = lv_label_create(hdr);
     lv_label_set_text(tlbl, "Lines");
@@ -708,6 +719,275 @@ static void build_settings(lv_obj_t *scr) {
     }
 }
 
+// ── WiFi credential helpers ───────────────────────────────────────────────
+static void load_wifi_credentials() {
+    Preferences prefs;
+    prefs.begin("wifi", true);
+    String ssid = prefs.getString("ssid", "");
+    String pass = prefs.getString("password", "");
+    prefs.end();
+    strncpy(g_wifi_ssid,     ssid.c_str(), 63);
+    strncpy(g_wifi_password, pass.c_str(), 63);
+    g_wifi_ssid[63] = g_wifi_password[63] = '\0';
+    Serial.printf("[WiFi] Loaded from NVS: ssid='%s' pass_len=%d\n", g_wifi_ssid, (int)strlen(g_wifi_password));
+}
+
+static const char *wifi_status_str(wl_status_t s) {
+    switch (s) {
+        case WL_IDLE_STATUS:      return "IDLE";
+        case WL_NO_SSID_AVAIL:    return "NO_SSID_AVAIL";
+        case WL_SCAN_COMPLETED:   return "SCAN_COMPLETED";
+        case WL_CONNECTED:        return "CONNECTED";
+        case WL_CONNECT_FAILED:   return "CONNECT_FAILED";
+        case WL_CONNECTION_LOST:  return "CONNECTION_LOST";
+        case WL_DISCONNECTED:     return "DISCONNECTED";
+        default:                  return "UNKNOWN";
+    }
+}
+
+static void wifi_connect_and_save() {
+    if (g_ssid_ta) strncpy(g_wifi_ssid,     lv_textarea_get_text(g_ssid_ta), 63);
+    if (g_pwd_ta)  strncpy(g_wifi_password,  lv_textarea_get_text(g_pwd_ta),  63);
+    g_wifi_ssid[63] = g_wifi_password[63] = '\0';
+
+    Serial.printf("[WiFi] SSID='%s' pass_len=%d\n", g_wifi_ssid, (int)strlen(g_wifi_password));
+
+    if (g_wifi_keyboard) lv_obj_add_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+
+    if (strlen(g_wifi_ssid) == 0) {
+        Serial.println("[WiFi] Aborted: empty SSID");
+        if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Enter an SSID first");
+        return;
+    }
+
+    if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connecting...");
+    lv_timer_handler();
+
+    Serial.printf("[WiFi] Free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
+    Serial.printf("[WiFi] Status before connect: %s\n", wifi_status_str(WiFi.status()));
+    WiFi.disconnect(false);
+    delay(100);
+    Serial.printf("[WiFi] begin('%s')\n", g_wifi_ssid);
+    WiFi.begin(g_wifi_ssid, g_wifi_password);
+
+    uint32_t start = millis();
+    wl_status_t last_status = WL_IDLE_STATUS;
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        wl_status_t cur = WiFi.status();
+        if (cur != last_status) {
+            Serial.printf("[WiFi] status changed: %s (+%lums)\n", wifi_status_str(cur), millis() - start);
+            last_status = cur;
+        }
+        lv_timer_handler();
+        delay(50);
+    }
+
+    wl_status_t final_status = WiFi.status();
+    Serial.printf("[WiFi] done after %lums, status=%s\n", millis() - start, wifi_status_str(final_status));
+
+    if (final_status == WL_CONNECTED) {
+        Serial.printf("[WiFi] IP=%s\n", WiFi.localIP().toString().c_str());
+        Preferences prefs;
+        prefs.begin("wifi", false);
+        prefs.putString("ssid",     g_wifi_ssid);
+        prefs.putString("password", g_wifi_password);
+        prefs.end();
+        Serial.println("[WiFi] Credentials saved to NVS");
+        if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connected & saved");
+    } else {
+        WiFi.disconnect(false);
+        Serial.println("[WiFi] Connection failed");
+        if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connection failed - check credentials");
+    }
+}
+
+// ── WiFi config screen ────────────────────────────────────────────────────
+static void build_wifi_config(lv_obj_t *scr) {
+    g_wifi_keyboard   = nullptr;
+    g_ssid_ta         = nullptr;
+    g_pwd_ta          = nullptr;
+    g_wifi_status_lbl = nullptr;
+
+    lv_obj_t *hdr  = build_header(scr);
+    lv_obj_t *bbtn = build_back_btn(hdr);
+    lv_obj_add_event_cb(bbtn, back_to_settings, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *tlbl = lv_label_create(hdr);
+    lv_label_set_text(tlbl, "Wi-Fi");
+    lv_obj_set_style_text_color(tlbl, C(0xE6E8EB), 0);
+    lv_obj_set_style_text_font(tlbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(tlbl, LV_ALIGN_LEFT_MID, 44, 0);
+
+    // SSID label
+    lv_obj_t *ssid_lbl = lv_label_create(scr);
+    lv_label_set_text(ssid_lbl, "Network (SSID)");
+    lv_obj_set_style_text_color(ssid_lbl, C(0x6E7681), 0);
+    lv_obj_set_style_text_font(ssid_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_pos(ssid_lbl, 20, 68);
+
+    // SSID textarea
+    lv_obj_t *ssid_ta = lv_textarea_create(scr);
+    lv_obj_set_pos(ssid_ta, 20, 86);
+    lv_textarea_set_one_line(ssid_ta, true);
+    lv_obj_set_size(ssid_ta, TFT_HOR_RES - 40, 48);  // set after one_line to override auto-height
+    lv_textarea_set_placeholder_text(ssid_ta, "Enter network name");
+    lv_textarea_set_text(ssid_ta, g_wifi_ssid);
+    lv_obj_set_style_bg_color(ssid_ta, C(0x14181E), 0);
+    lv_obj_set_style_bg_opa(ssid_ta, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(ssid_ta, C(0x2A3038), 0);
+    lv_obj_set_style_border_width(ssid_ta, 1, 0);
+    lv_obj_set_style_border_color(ssid_ta, C(0x39B57C), LV_STATE_FOCUSED);
+    lv_obj_set_style_radius(ssid_ta, 8, 0);
+    lv_obj_set_style_text_color(ssid_ta, C(0xE6E8EB), 0);
+    lv_obj_set_style_text_font(ssid_ta, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_hor(ssid_ta, 12, 0);
+    lv_obj_set_style_pad_ver(ssid_ta, 15, 0);
+
+    // Password label
+    lv_obj_t *pwd_lbl = lv_label_create(scr);
+    lv_label_set_text(pwd_lbl, "Password");
+    lv_obj_set_style_text_color(pwd_lbl, C(0x6E7681), 0);
+    lv_obj_set_style_text_font(pwd_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_pos(pwd_lbl, 20, 148);
+
+    // Password textarea
+    lv_obj_t *pwd_ta = lv_textarea_create(scr);
+    lv_obj_set_pos(pwd_ta, 20, 166);
+    lv_textarea_set_one_line(pwd_ta, true);
+    lv_obj_set_size(pwd_ta, TFT_HOR_RES - 40, 48);  // set after one_line to override auto-height
+    lv_textarea_set_password_mode(pwd_ta, true);
+    lv_textarea_set_placeholder_text(pwd_ta, "Enter password");
+    lv_textarea_set_text(pwd_ta, g_wifi_password);
+    lv_obj_set_style_bg_color(pwd_ta, C(0x14181E), 0);
+    lv_obj_set_style_bg_opa(pwd_ta, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(pwd_ta, C(0x2A3038), 0);
+    lv_obj_set_style_border_width(pwd_ta, 1, 0);
+    lv_obj_set_style_border_color(pwd_ta, C(0x39B57C), LV_STATE_FOCUSED);
+    lv_obj_set_style_radius(pwd_ta, 8, 0);
+    lv_obj_set_style_text_color(pwd_ta, C(0xE6E8EB), 0);
+    lv_obj_set_style_text_font(pwd_ta, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_hor(pwd_ta, 12, 0);
+    lv_obj_set_style_pad_ver(pwd_ta, 15, 0);
+
+    // Save button (visible when keyboard hidden; overlapped by keyboard when typing)
+    lv_obj_t *save_btn = lv_button_create(scr);
+    lv_obj_set_size(save_btn, TFT_HOR_RES - 40, 48);
+    lv_obj_set_pos(save_btn, 20, 230);
+    lv_obj_set_style_bg_color(save_btn, C(0x39B57C), 0);
+    lv_obj_set_style_bg_opa(save_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(save_btn, 0, 0);
+    lv_obj_set_style_radius(save_btn, 10, 0);
+    lv_obj_set_style_pad_all(save_btn, 0, 0);
+    lv_obj_remove_flag(save_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *save_lbl = lv_label_create(save_btn);
+    lv_label_set_text(save_lbl, "Connect & Save");
+    lv_obj_set_style_text_color(save_lbl, C(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(save_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(save_lbl, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_event_cb(save_btn, [](lv_event_t *) {
+        wifi_connect_and_save();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // Connection status label — updated by wifi_connect_and_save()
+    lv_obj_t *status_lbl = lv_label_create(scr);
+    char init_status[80] = "";
+    if (WiFi.status() == WL_CONNECTED)
+        snprintf(init_status, sizeof(init_status), "Connected to: %s", WiFi.SSID().c_str());
+    else if (strlen(g_wifi_ssid) > 0)
+        snprintf(init_status, sizeof(init_status), "Saved: %s", g_wifi_ssid);
+    lv_label_set_text(status_lbl, init_status);
+    lv_obj_set_style_text_color(status_lbl, C(0x9AA3AD), 0);
+    lv_obj_set_style_text_font(status_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_width(status_lbl, TFT_HOR_RES - 40);
+    lv_obj_set_pos(status_lbl, 20, 288);
+    lv_obj_set_style_text_align(status_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    g_wifi_status_lbl = status_lbl;
+
+    // Keyboard — created last so it renders on top; hidden until a field is focused
+    lv_obj_t *kb = lv_keyboard_create(scr);
+    lv_obj_set_size(kb, TFT_HOR_RES, 220);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    g_wifi_keyboard = kb;
+    g_ssid_ta       = ssid_ta;
+    g_pwd_ta        = pwd_ta;
+
+    lv_obj_add_event_cb(ssid_ta, [](lv_event_t *) {
+        if (g_wifi_keyboard) {
+            lv_keyboard_set_textarea(g_wifi_keyboard, g_ssid_ta);
+            lv_obj_remove_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+    }, LV_EVENT_FOCUSED, nullptr);
+
+    lv_obj_add_event_cb(pwd_ta, [](lv_event_t *) {
+        if (g_wifi_keyboard) {
+            lv_keyboard_set_textarea(g_wifi_keyboard, g_pwd_ta);
+            lv_obj_remove_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+    }, LV_EVENT_FOCUSED, nullptr);
+
+    lv_obj_add_event_cb(kb, [](lv_event_t *e) {
+        lv_event_code_t code = lv_event_get_code(e);
+        if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+            lv_obj_add_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_ALL, nullptr);
+}
+
+// ── Settings menu screen ──────────────────────────────────────────────────
+static void build_settings(lv_obj_t *scr) {
+    lv_obj_t *hdr  = build_header(scr);
+    lv_obj_t *bbtn = build_back_btn(hdr);
+    lv_obj_add_event_cb(bbtn, back_to_home, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *tlbl = lv_label_create(hdr);
+    lv_label_set_text(tlbl, "Settings");
+    lv_obj_set_style_text_color(tlbl, C(0xE6E8EB), 0);
+    lv_obj_set_style_text_font(tlbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(tlbl, LV_ALIGN_LEFT_MID, 44, 0);
+
+    struct MenuItem { const char *icon; const char *label; ScreenType target; };
+    static const MenuItem items[] = {
+        { LV_SYMBOL_LIST, "Lines", SCREEN_SETTINGS_LINES },
+        { LV_SYMBOL_WIFI, "Wi-Fi", SCREEN_WIFI_CONFIG    },
+    };
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *row = lv_button_create(scr);
+        lv_obj_set_size(row, TFT_HOR_RES - 24, 64);
+        lv_obj_set_pos(row, 12, 68 + i * 72);
+        lv_obj_set_style_bg_color(row, C(0x14181E), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_radius(row, 10, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(row, [](lv_event_t *e) {
+            navigate_to((ScreenType)(uintptr_t)lv_event_get_user_data(e));
+        }, LV_EVENT_CLICKED, (void *)(uintptr_t)items[i].target);
+
+        lv_obj_t *icon = lv_label_create(row);
+        lv_label_set_text(icon, items[i].icon);
+        lv_obj_set_style_text_color(icon, C(0x9AA3AD), 0);
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 16, 0);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_label_set_text(lbl, items[i].label);
+        lv_obj_set_style_text_color(lbl, C(0xE6E8EB), 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 46, 0);
+        lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t *chev = lv_label_create(row);
+        lv_label_set_text(chev, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(chev, C(0x3A4048), 0);
+        lv_obj_set_style_text_font(chev, &lv_font_montserrat_16, 0);
+        lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -16, 0);
+        lv_obj_remove_flag(chev, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
 // ── Navigation ───────────────────────────────────────────────────────────
 // Reset page when navigating to a non-home screen so returning home lands on p0
 static void delete_scr_async(void *param) {
@@ -715,8 +995,12 @@ static void delete_scr_async(void *param) {
 }
 
 static void navigate_to(ScreenType type, int line_idx) {
-    g_time_lbl  = nullptr;
-    g_tile_cont = nullptr;
+    g_time_lbl        = nullptr;
+    g_tile_cont       = nullptr;
+    g_wifi_keyboard   = nullptr;
+    g_ssid_ta         = nullptr;
+    g_pwd_ta          = nullptr;
+    g_wifi_status_lbl = nullptr;
     if (type != SCREEN_HOME) g_home_page = 0;
 
     lv_obj_t *old_scr = lv_screen_active();
@@ -725,9 +1009,11 @@ static void navigate_to(ScreenType type, int line_idx) {
     style_screen(new_scr);
 
     switch (type) {
-        case SCREEN_HOME:     build_home(new_scr);            break;
-        case SCREEN_DETAIL:   build_detail(new_scr, line_idx); break;
-        case SCREEN_SETTINGS: build_settings(new_scr);        break;
+        case SCREEN_HOME:           build_home(new_scr);             break;
+        case SCREEN_DETAIL:         build_detail(new_scr, line_idx); break;
+        case SCREEN_SETTINGS:       build_settings(new_scr);         break;
+        case SCREEN_SETTINGS_LINES: build_settings_lines(new_scr);   break;
+        case SCREEN_WIFI_CONFIG:    build_wifi_config(new_scr);      break;
     }
 
     lv_scr_load(new_scr);
@@ -778,6 +1064,14 @@ static void clock_cb(lv_timer_t *) {
 // ── setup / loop ─────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+
+    // Init WiFi stack before LVGL/display allocate internal heap.
+    // ESP32-S3 WiFi needs ~130 KB of internal DRAM; claiming it first avoids OOM later.
+    Serial.printf("[WiFi] Free heap before WiFi init: %lu\n", (unsigned long)ESP.getFreeHeap());
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    Serial.printf("[WiFi] Free heap after  WiFi init: %lu\n", (unsigned long)ESP.getFreeHeap());
+
     touch_init();
 
     bus = new Arduino_ESP32SPI(
@@ -790,7 +1084,7 @@ void setup() {
         4, 5, 6, 7, 15,
         1, 10, 8, 50,
         1, 10, 8, 20,
-        0, GFX_NOT_DEFINED, false, 0, 0, TFT_HOR_RES * 20);
+        0, GFX_NOT_DEFINED, false, 0, 0, TFT_HOR_RES * 10);
 
     gfx = new Arduino_RGB_Display(
         480, 480, rgbpanel, 0, true,
@@ -828,6 +1122,7 @@ void setup() {
 
     lv_timer_create(clock_cb, 10000, nullptr);
 
+    load_wifi_credentials();
     navigate_to(SCREEN_HOME);
 }
 

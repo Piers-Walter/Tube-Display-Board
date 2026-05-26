@@ -29,12 +29,21 @@ Three screens navigate via touch:
 - **Clock**: Runs from millis() starting at 12:00 (no RTC/NTP in current stub build)
 - **Line data**: All 12 lines hard-coded with TfL official hex colours
 
+## WiFi credential persistence
+
+Credentials are stored in NVS via the ESP32 `Preferences` library (namespace `"wifi"`, keys `"ssid"` / `"password"`).
+
+- `load_wifi_credentials()` — called in `setup()`, populates `g_wifi_ssid` / `g_wifi_password` from NVS.
+- `wifi_connect_and_save()` — called by the "Connect & Save" button on the Wi-Fi config screen. Attempts `WiFi.begin()` with up to a 15 s timeout (polling `lv_timer_handler()` to keep the UI live), then writes credentials to NVS only on success.
+- The Wi-Fi config screen shows current connection state ("Connected to: …" or "Saved: …") on open and updates inline with "Connected & saved" or "Connection failed — check credentials".
+- `WiFi.h` and `Preferences.h` are part of the ESP32 Arduino core — no extra `lib_deps` needed.
+
 ## TfL API (stubbed)
 
 `fetch_tfl_status()` in main.cpp is a no-op placeholder. To wire up real data:
 
-1. Add `WiFi.h`, `HTTPClient.h`, `ArduinoJson.h` to `platformio.ini` lib_deps
-2. Connect WiFi in `setup()`
+1. Add `HTTPClient.h`, `ArduinoJson.h` to `platformio.ini` lib_deps (`WiFi.h` already included)
+2. Connect WiFi using saved credentials from `load_wifi_credentials()` / `wifi_connect_and_save()`
 3. In `fetch_tfl_status()`, GET:
    ```
    https://api.tfl.gov.uk/Line/Mode/tube,dlr,elizabeth-line,tram,overground/Status
