@@ -51,7 +51,7 @@ static const LineInfo LINES[NUM_LINES] = {
     { "central",         "Central",            nullptr,   0xE32017, false },
     { "circle",          "Circle",             nullptr,   0xFFD300, true  },
     { "district",        "District",           nullptr,   0x00782A, false },
-    { "elizabeth",       "Elizabeth line",     nullptr,   0x6950A1, false },
+    { "elizabeth",       "Elizabeth",          nullptr,   0x6950A1, false },
     { "hammersmith-city","Hammersmith & City", "H&C",     0xF3A9BB, true  },
     { "jubilee",         "Jubilee",            nullptr,   0xA0A5A9, true  },
     { "metropolitan",    "Metropolitan",       "Met",     0x9B0056, false },
@@ -59,7 +59,7 @@ static const LineInfo LINES[NUM_LINES] = {
     { "piccadilly",      "Piccadilly",         nullptr,   0x003688, false },
     { "victoria",        "Victoria",           nullptr,   0x0098D4, false },
     { "waterloo-city",   "Waterloo & City",    "W&C",     0x95CDBA, true  },
-    // ── Other modes ─────────────────────────────────────────────────────────
+    // ── Other modes ─────────────────────────────────────────────────────────]
     { "dlr",             "DLR",                nullptr,   0x009BBB, false },
     // Overground (2024 rebrand — 6 named lines)
     { "lioness",         "Lioness",            nullptr,   0xF882B8, true  },
@@ -113,10 +113,13 @@ static int  last_updated_min = 2;              // stub: pretend fetched 2min ago
 static char disp_names[NUM_LINES][20];         // uppercase badge labels
 
 // ── Pagination state ──────────────────────────────────────────────────────
-static int     g_home_page       = 0;
-static int     g_home_page_count = 1;
-static int16_t g_swipe_start_x   = 0;
-static bool    g_was_swipe       = false;
+static int        g_home_page       = 0;
+static int        g_home_page_count = 1;
+static int16_t    g_swipe_start_x   = 0;
+static bool       g_was_swipe       = false;
+static lv_obj_t  *g_tile_cont       = nullptr;
+static int16_t    g_cont_start_x    = 0;
+static lv_obj_t  *g_page_dots[8]    = {};
 
 // ── UI refs ────────────────────────────────────────────────────────────────
 typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS } ScreenType;
@@ -266,21 +269,53 @@ static void home_swipe_pressed_cb(lv_event_t *) {
     lv_indev_get_point(lv_indev_active(), &p);
     g_swipe_start_x = p.x;
     g_was_swipe = false;
+    if (g_tile_cont) {
+        lv_anim_delete(g_tile_cont, nullptr);
+        g_cont_start_x = (int16_t)lv_obj_get_x(g_tile_cont);
+    }
+}
+
+static void home_swipe_pressing_cb(lv_event_t *) {
+    if (!g_tile_cont) return;
+    lv_point_t p;
+    lv_indev_get_point(lv_indev_active(), &p);
+    int dx   = (int)p.x - g_swipe_start_x;
+    int nx   = (int)g_cont_start_x + dx;
+    int minx = -(g_home_page_count - 1) * TFT_HOR_RES;
+    if (nx > 0)    nx = nx / 3;
+    if (nx < minx) nx = minx + (nx - minx) / 3;
+    lv_obj_set_x(g_tile_cont, nx);
+    if (dx > 10 || dx < -10) g_was_swipe = true;
 }
 
 static void home_swipe_released_cb(lv_event_t *) {
+    if (!g_tile_cont) return;
     lv_point_t p;
     lv_indev_get_point(lv_indev_active(), &p);
     int dx = (int)p.x - g_swipe_start_x;
     if (dx < -40 && g_home_page < g_home_page_count - 1) {
-        g_was_swipe = true;
         g_home_page++;
-        navigate_to(SCREEN_HOME);
-    } else if (dx > 40 && g_home_page > 0) {
         g_was_swipe = true;
+    } else if (dx > 40 && g_home_page > 0) {
         g_home_page--;
-        navigate_to(SCREEN_HOME);
+        g_was_swipe = true;
     }
+    for (int i = 0; i < g_home_page_count && i < 8; i++) {
+        if (g_page_dots[i])
+            lv_obj_set_style_bg_color(g_page_dots[i],
+                i == g_home_page ? C(0xE6E8EB) : C(0x3A4048), 0);
+    }
+    int target_x = -g_home_page * TFT_HOR_RES;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, g_tile_cont);
+    lv_anim_set_exec_cb(&a, [](void *obj, int32_t v) {
+        lv_obj_set_x((lv_obj_t *)obj, v);
+    });
+    lv_anim_set_values(&a, lv_obj_get_x(g_tile_cont), target_x);
+    lv_anim_set_duration(&a, 250);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
 
 static void build_home(lv_obj_t *scr) {
@@ -298,12 +333,6 @@ static void build_home(lv_obj_t *scr) {
     g_home_page_count = (total + LINES_PER_PAGE - 1) / LINES_PER_PAGE;
     if (g_home_page_count < 1) g_home_page_count = 1;
     if (g_home_page >= g_home_page_count) g_home_page = g_home_page_count - 1;
-
-    // Page slice
-    int page_start = g_home_page * LINES_PER_PAGE;
-    int page_end   = page_start + LINES_PER_PAGE;
-    if (page_end > total) page_end = total;
-    int n = page_end - page_start;
 
     // Header
     lv_obj_t *hdr = build_header(scr);
@@ -356,56 +385,70 @@ static void build_home(lv_obj_t *scr) {
     int tile_h = (grid_h - (ROWS - 1) * gap) / ROWS;                // 120
     int badge_cont_w = BADGE_SIZE + 2 * (BADGE_SIZE * 11 / 100);    //  86
 
-    for (int t = 0; t < n; t++) {
-        int idx                = all_sorted[page_start + t];
-        const StatusInfo &st   = line_statuses[idx];
-        const StatusTone &tone = STATUS_TONES[(int)st.level];
-        int col = t % COLS;
-        int row = t / COLS;
-        int tx  = pad + col * (tile_w + gap);
-        int ty  = 56 + pad + row * (tile_h + gap);
+    // Wide container spanning all pages side-by-side; slides on swipe
+    g_tile_cont = lv_obj_create(scr);
+    lv_obj_set_size(g_tile_cont, g_home_page_count * TFT_HOR_RES, TFT_VER_RES - 56);
+    lv_obj_set_pos(g_tile_cont, -g_home_page * TFT_HOR_RES, 56);
+    no_decor(g_tile_cont);
 
-        lv_obj_t *tile = lv_button_create(scr);
-        lv_obj_set_size(tile, tile_w, tile_h);
-        lv_obj_set_pos(tile, tx, ty);
-        lv_obj_set_style_bg_color(tile, C(tone.bg), 0);
-        lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(tile, 0, 0);
-        lv_obj_set_style_radius(tile, 10, 0);
-        lv_obj_set_style_pad_all(tile, 0, 0);
-        lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(tile, home_swipe_pressed_cb, LV_EVENT_PRESSED, nullptr);
-        lv_obj_add_event_cb(tile, home_swipe_released_cb, LV_EVENT_RELEASED, nullptr);
-        lv_obj_add_event_cb(tile, tile_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)idx);
+    for (int pg = 0; pg < g_home_page_count; pg++) {
+        int ps = pg * LINES_PER_PAGE;
+        int pe = ps + LINES_PER_PAGE;
+        if (pe > total) pe = total;
+        for (int t = 0; t < pe - ps; t++) {
+            int idx                = all_sorted[ps + t];
+            const StatusInfo &st   = line_statuses[idx];
+            const StatusTone &tone = STATUS_TONES[(int)st.level];
+            int col = t % COLS;
+            int row = t / COLS;
+            int tx  = pg * TFT_HOR_RES + pad + col * (tile_w + gap);
+            int ty  = pad + row * (tile_h + gap);
 
-        bool has_status_text = (st.level != STATUS_GOOD);
-        int text_reserve = has_status_text ? 26 : 14;
-        int badge_top    = (tile_h - text_reserve) / 2 - BADGE_SIZE / 2;
-        if (badge_top < 6) badge_top = 6;
+            lv_obj_t *tile = lv_button_create(g_tile_cont);
+            lv_obj_set_size(tile, tile_w, tile_h);
+            lv_obj_set_pos(tile, tx, ty);
+            lv_obj_set_style_bg_color(tile, C(tone.bg), 0);
+            lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(tile, 0, 0);
+            lv_obj_set_style_radius(tile, 10, 0);
+            lv_obj_set_style_pad_all(tile, 0, 0);
+            lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_event_cb(tile, home_swipe_pressed_cb,  LV_EVENT_PRESSED,  nullptr);
+            lv_obj_add_event_cb(tile, home_swipe_pressing_cb, LV_EVENT_PRESSING, nullptr);
+            lv_obj_add_event_cb(tile, home_swipe_released_cb, LV_EVENT_RELEASED, nullptr);
+            lv_obj_add_event_cb(tile, tile_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)idx);
 
-        lv_obj_t *badge = create_badge(tile, idx, BADGE_SIZE);
-        lv_obj_set_pos(badge, (tile_w - badge_cont_w) / 2, badge_top);
+            bool has_status_text = (st.level != STATUS_GOOD);
+            int text_reserve = has_status_text ? 26 : 14;
+            int badge_top    = (tile_h - text_reserve) / 2 - BADGE_SIZE / 2;
+            if (badge_top < 6) badge_top = 6;
 
-        if (has_status_text) {
-            lv_obj_t *stlbl = lv_label_create(tile);
-            lv_label_set_text(stlbl, st.headline);
-            lv_obj_set_style_text_color(stlbl, C(tone.fg), 0);
-            lv_obj_set_style_text_font(stlbl, &lv_font_montserrat_10, 0);
-            lv_obj_align(stlbl, LV_ALIGN_BOTTOM_MID, 0, -8);
+            lv_obj_t *badge = create_badge(tile, idx, BADGE_SIZE);
+            lv_obj_set_pos(badge, (tile_w - badge_cont_w) / 2, badge_top);
+
+            if (has_status_text) {
+                lv_obj_t *stlbl = lv_label_create(tile);
+                lv_label_set_text(stlbl, st.headline);
+                lv_obj_set_style_text_color(stlbl, C(tone.fg), 0);
+                lv_obj_set_style_text_font(stlbl, &lv_font_montserrat_10, 0);
+                lv_obj_align(stlbl, LV_ALIGN_BOTTOM_MID, 0, -8);
+            }
         }
     }
 
-    // Swipe handlers on the screen background for gaps between tiles
-    lv_obj_add_event_cb(scr, home_swipe_pressed_cb, LV_EVENT_PRESSED, nullptr);
+    // Swipe on screen background (gaps between tiles)
+    lv_obj_add_event_cb(scr, home_swipe_pressed_cb,  LV_EVENT_PRESSED,  nullptr);
+    lv_obj_add_event_cb(scr, home_swipe_pressing_cb, LV_EVENT_PRESSING, nullptr);
     lv_obj_add_event_cb(scr, home_swipe_released_cb, LV_EVENT_RELEASED, nullptr);
 
-    // Page indicator dots
+    // Page indicator dots (stored for live colour updates on swipe)
+    memset(g_page_dots, 0, sizeof(g_page_dots));
     if (g_home_page_count > 1) {
         static const int DOT_D = 7, DOT_GAP = 6;
         int dots_w = g_home_page_count * DOT_D + (g_home_page_count - 1) * DOT_GAP;
         int dot_x0 = (TFT_HOR_RES - dots_w) / 2;
         int dot_y  = TFT_VER_RES - 14;
-        for (int p = 0; p < g_home_page_count; p++) {
+        for (int p = 0; p < g_home_page_count && p < 8; p++) {
             lv_obj_t *dot = lv_obj_create(scr);
             lv_obj_set_size(dot, DOT_D, DOT_D);
             lv_obj_set_pos(dot, dot_x0 + p * (DOT_D + DOT_GAP), dot_y);
@@ -414,6 +457,7 @@ static void build_home(lv_obj_t *scr) {
             lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
             lv_obj_set_style_border_width(dot, 0, 0);
             lv_obj_remove_flag(dot, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+            g_page_dots[p] = dot;
         }
     }
 }
@@ -671,7 +715,8 @@ static void delete_scr_async(void *param) {
 }
 
 static void navigate_to(ScreenType type, int line_idx) {
-    g_time_lbl = nullptr;
+    g_time_lbl  = nullptr;
+    g_tile_cont = nullptr;
     if (type != SCREEN_HOME) g_home_page = 0;
 
     lv_obj_t *old_scr = lv_screen_active();
@@ -744,7 +789,8 @@ void setup() {
         8, 20, 3, 46, 9, 10,
         4, 5, 6, 7, 15,
         1, 10, 8, 50,
-        1, 10, 8, 20);
+        1, 10, 8, 20,
+        0, GFX_NOT_DEFINED, false, 0, 0, TFT_HOR_RES * 20);
 
     gfx = new Arduino_RGB_Display(
         480, 480, rgbpanel, 0, true,
@@ -787,5 +833,5 @@ void setup() {
 
 void loop() {
     lv_timer_handler();
-    delay(5);
+    // delay(2);
 }
