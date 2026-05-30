@@ -75,6 +75,16 @@ GET https://api.tfl.gov.uk/Line/Mode/tube,dlr,elizabeth-line,tram,overground/Sta
 - `line_statuses[]` — 20 × ~400 bytes of status strings, allocated with `ps_calloc()`
 - Both fall back to DRAM if PSRAM allocation fails
 
+## Screenshot server (dev only)
+
+Disabled by default. To enable, uncomment `-D SCREENSHOT_SERVER` in `platformio.ini` `build_flags`.
+
+When enabled, a WebServer starts on port 80 once WiFi connects. Hit `http://<device-IP>/screenshot` in a browser to download the current screen as a 24-bit BMP.
+
+- Uses `lv_snapshot_take()` (LVGL's snapshot API, also only compiled in when the flag is set)
+- Converts RGB565 → BGR888 row-by-row; streams directly to the TCP client without a second PSRAM buffer
+- Zero overhead in production: the entire feature is inside `#ifdef SCREENSHOT_SERVER` guards in both `main.cpp` and `lv_conf.h`
+
 ## Build
 
 ```bash

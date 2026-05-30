@@ -846,7 +846,11 @@
  *==================*/
 
 /*1: Enable API to take snapshot for object*/
+#ifdef SCREENSHOT_SERVER
+#define LV_USE_SNAPSHOT 1
+#else
 #define LV_USE_SNAPSHOT 0
+#endif
 
 /*1: Enable system monitor component*/
 #define LV_USE_SYSMON   0

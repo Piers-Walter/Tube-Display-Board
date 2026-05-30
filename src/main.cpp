@@ -12,6 +12,9 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <time.h>
+#ifdef SCREENSHOT_SERVER
+#include <WebServer.h>
+#endif
 
 // ── Hardware ────────────────────────────────────────────────────────────────
 #define GFX_BL         38
@@ -115,6 +118,9 @@ static lv_obj_t *g_toggle_knob[NUM_LINES]  = {};
 // WiFi config state
 static char      g_wifi_ssid[64]     = "";
 static char      g_wifi_password[64] = "";
+#ifdef SCREENSHOT_SERVER
+static WebServer g_screenshot_server(80);
+#endif
 static lv_obj_t *g_wifi_keyboard     = nullptr;
 static lv_obj_t *g_ssid_ta           = nullptr;
 static lv_obj_t *g_pwd_ta            = nullptr;
@@ -925,7 +931,12 @@ static void wifi_connect_and_save() {
         prefs.putString("password", g_wifi_password);
         prefs.end();
         configure_ntp();
-        if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connected & saved");
+        if (g_wifi_status_lbl) {
+            char connected_msg[60];
+            snprintf(connected_msg, sizeof(connected_msg), "Connected & saved\n%s",
+                     WiFi.localIP().toString().c_str());
+            lv_label_set_text(g_wifi_status_lbl, connected_msg);
+        }
     } else {
         WiFi.disconnect(false);
         if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connection failed - check credentials");
@@ -1015,9 +1026,10 @@ static void build_wifi_config(lv_obj_t *scr) {
     }, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *status_lbl = lv_label_create(scr);
-    char init_status[80] = "";
+    char init_status[100] = "";
     if (WiFi.status() == WL_CONNECTED)
-        snprintf(init_status, sizeof(init_status), "Connected to: %s", WiFi.SSID().c_str());
+        snprintf(init_status, sizeof(init_status), "Connected to: %s\n%s",
+                 WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
     else if (strlen(g_wifi_ssid) > 0)
         snprintf(init_status, sizeof(init_status), "Saved: %s", g_wifi_ssid);
     lv_label_set_text(status_lbl, init_status);
@@ -1362,6 +1374,78 @@ static void clock_cb(lv_timer_t *) {
     update_wifi_icon();
 }
 
+// ── Screenshot server ─────────────────────────────────────────────────────
+#ifdef SCREENSHOT_SERVER
+static void screenshot_handler() {
+    // lv_snapshot_take allocates via LVGL's heap (128 KB) — too small for 480×480 RGB565 (~460 KB).
+    // Pre-allocate from PSRAM and use lv_snapshot_take_to_draw_buf instead.
+    const uint32_t buf_size = (uint32_t)TFT_HOR_RES * TFT_VER_RES * 2;
+    uint8_t *pixel_buf = (uint8_t *)ps_malloc(buf_size);
+    if (!pixel_buf) {
+        g_screenshot_server.send(503, "text/plain", "PSRAM alloc failed");
+        return;
+    }
+
+    lv_draw_buf_t draw_buf;
+    lv_draw_buf_init(&draw_buf, TFT_HOR_RES, TFT_VER_RES, LV_COLOR_FORMAT_RGB565,
+                     LV_STRIDE_AUTO, pixel_buf, buf_size);
+
+    if (lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &draw_buf) != LV_RESULT_OK) {
+        free(pixel_buf);
+        g_screenshot_server.send(503, "text/plain", "Snapshot failed");
+        return;
+    }
+
+    const uint32_t stride     = draw_buf.header.stride;  // may include alignment padding
+    const uint32_t pixel_data_size = (uint32_t)TFT_HOR_RES * TFT_VER_RES * 3;
+    const uint32_t file_size  = 54 + pixel_data_size;
+
+    // BMP file header (14 b) + BITMAPINFOHEADER (40 b)
+    uint8_t hdr[54] = {};
+    hdr[0] = 'B'; hdr[1] = 'M';
+    memcpy(hdr + 2,  &file_size,            4);
+    const uint32_t pix_offset = 54;
+    memcpy(hdr + 10, &pix_offset,           4);
+    const uint32_t dib_size = 40;
+    memcpy(hdr + 14, &dib_size,             4);
+    const int32_t bw = TFT_HOR_RES, bh = TFT_VER_RES;
+    memcpy(hdr + 18, &bw, 4);
+    memcpy(hdr + 22, &bh, 4);  // positive height = bottom-up row order
+    hdr[26] = 1;   // colour planes
+    hdr[28] = 24;  // bits per pixel (RGB888)
+
+    WiFiClient client = g_screenshot_server.client();
+    client.printf("HTTP/1.1 200 OK\r\nContent-Type: image/bmp\r\nContent-Length: %u\r\nConnection: close\r\n\r\n",
+                  (unsigned)file_size);
+    client.write(hdr, sizeof(hdr));
+
+    // Convert RGB565 → BGR888 row by row, bottom-to-top (BMP convention)
+    uint8_t row_buf[TFT_HOR_RES * 3];
+    for (int y = TFT_VER_RES - 1; y >= 0; y--) {
+        const uint16_t *row = reinterpret_cast<const uint16_t *>(pixel_buf + y * stride);
+        for (int x = 0; x < TFT_HOR_RES; x++) {
+            uint16_t p = row[x];
+            uint8_t r = (p >> 11) & 0x1F; r = (r << 3) | (r >> 2);
+            uint8_t g = (p >>  5) & 0x3F; g = (g << 2) | (g >> 4);
+            uint8_t b =  p        & 0x1F; b = (b << 3) | (b >> 2);
+            row_buf[x * 3]     = b;
+            row_buf[x * 3 + 1] = g;
+            row_buf[x * 3 + 2] = r;
+        }
+        client.write(row_buf, sizeof(row_buf));
+    }
+
+    free(pixel_buf);
+    client.stop();
+}
+
+static void screenshot_server_begin() {
+    g_screenshot_server.on("/screenshot", HTTP_GET, screenshot_handler);
+    g_screenshot_server.begin();
+    Serial.printf("[Screenshot] http://%s/screenshot\n", WiFi.localIP().toString().c_str());
+}
+#endif  // SCREENSHOT_SERVER
+
 // ── setup / loop ─────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
@@ -1460,12 +1544,19 @@ void setup() {
 void loop() {
     if (!g_wifi_was_connected && WiFi.status() == WL_CONNECTED) {
         g_wifi_was_connected = true;
+        Serial.printf("[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
         configure_ntp();
         g_fetch_requested = true;
+#ifdef SCREENSHOT_SERVER
+        screenshot_server_begin();
+#endif
     }
     if (g_fetch_requested) {
         g_fetch_requested = false;
         fetch_tfl_status();
     }
+#ifdef SCREENSHOT_SERVER
+    g_screenshot_server.handleClient();
+#endif
     lv_timer_handler();
 }
