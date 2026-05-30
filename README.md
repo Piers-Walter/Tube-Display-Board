@@ -1,17 +1,15 @@
-# ESP32-4848S040
-ESP32-4848S040 + lvgl platform.io example
+# Tube Status Display
+A display which will show the status of London's tube, DLR, Overground & Elizabeth lines. This has been designed to run on the ESP32-4848S040 display, which includes a built in ESP32-S3 as well as 480x480 IPS display.
 
-This is an example project using lgvl / Arduino GFX for the ESP32-4848S040
+## Features
+- Line Overviews
+- Detailed Information
+- Customise which lines you're interested in
 
-This hardware includes :
-- ESP32-S3 processor
-- 16 MByte Flash in QIO mode
-- 8 MByte PSRAM OPI
-- 4.3 inch, 480 * 480 px Display based on ST7701: 16 bit color, special ESP32-S3 parallel mode The display is supported by the “GFX Library for Arduino”.
-- Touch Sensor: GT911 on I2C, Address 0x5D
-- I2C bus using SDA=19, CLK=20
-- SD Card slot
-- 3 relays
+## Building
+To build this for your own display, simply clone this repo, open it with PlatformIO in VSCode and build & upload.
 
+Navigate to settings -> Wi-Fi and enter your credentials to allow it to start pulling data
 
-Using lvgl@^9.2.0
+## Data Sources
+This uses data from [TFL's Unified Data API](https://api-portal.tfl.gov.uk), which is called every 30 seconds to make sure it's as up to date as possible
