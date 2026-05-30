@@ -25,7 +25,7 @@ static Arduino_ESP32SPI   *bus;
 static Arduino_RGB_Display *gfx;
 static uint8_t *draw_buf = nullptr;  // PSRAM-allocated in setup()
 
-// -- Fonts ────────────────────────────────────────────────────────────────────
+// ── Extra Fonts ──────────────────────────────────────────────────────────────
 LV_FONT_DECLARE(lv_font_fa_extra_icons)
 #define FA_INFO_ICON "\xEF\x81\x9A"
 
@@ -788,7 +788,7 @@ static void build_settings_lines(lv_obj_t *scr) {
     }
 }
 
-// ── WiFi credential helpers ───────────────────────────────────────────────
+// ── Preferences helpers ───────────────────────────────────────────────
 static void save_line_prefs() {
     Preferences prefs;
     prefs.begin("lines", false);
@@ -1393,7 +1393,7 @@ void setup() {
         disp_names[i][j] = '\0';
     }
 
-    lv_timer_create(clock_cb, 10000, nullptr);
+    lv_timer_create(clock_cb, 1000, nullptr);
 
     load_line_prefs();
 
