@@ -86,7 +86,7 @@ static bool     line_enabled[NUM_LINES];
 static char     disp_names[NUM_LINES][20];
 static uint32_t g_last_fetch_ms   = 0;
 static bool     g_ever_fetched    = false;
-static char     g_last_fetch_time[6] = "";
+static char     g_last_fetch_time[6] = "--:--";
 
 // ── Screen/navigation state ───────────────────────────────────────────────
 typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG } ScreenType;
@@ -256,6 +256,7 @@ static lv_obj_t *build_back_btn(lv_obj_t *hdr) {
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_radius(btn, 8, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_ext_click_area(btn, 24);
     lv_obj_t *ico = lv_label_create(btn);
     lv_label_set_text(ico, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_color(ico, C(0xE6E8EB), 0);
