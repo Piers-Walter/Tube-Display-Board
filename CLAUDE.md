@@ -13,13 +13,15 @@ London Underground status board running on the ESP32-4848S040 480×480 touch dis
 
 ## Application overview
 
-Three screens navigate via touch:
+Screens navigate via touch:
 
 | Screen | Description |
 |--------|-------------|
 | **Home** | Dynamic grid sorted severe → minor → good. Layout chosen by enabled-line count: 1→1×1, 2→1×2, 3–4→2×2, 5–6→3×2, 7–9→3×3, 10+→4×3 (with paging). Badge size scales with layout (70–160 px). Page dots at bottom when multi-page. Header shows clock + last-updated. |
 | **Detail** | Large roundel badge, status pill, full disruption text for a single line. |
-| **Settings** | Toggle which lines appear on the home grid. All/None shortcuts. |
+| **Settings** | Menu with three items: Lines, Wi-Fi, About. |
+| **Settings → Lines** | Toggle which lines appear on the home grid. All/None shortcuts. |
+| **Settings → About** | App name, "Powered by TfL Open Data" attribution, TfL Open Data URL. |
 
 ## Key design decisions
 

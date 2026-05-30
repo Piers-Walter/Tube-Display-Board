@@ -25,6 +25,10 @@ static Arduino_ESP32SPI   *bus;
 static Arduino_RGB_Display *gfx;
 static uint8_t *draw_buf = nullptr;  // PSRAM-allocated in setup()
 
+// -- Fonts ────────────────────────────────────────────────────────────────────
+LV_FONT_DECLARE(lv_font_fa_extra_icons)
+#define FA_INFO_ICON "\xEF\x81\x9A"
+
 // ── Line data ────────────────────────────────────────────────────────────────
 #define NUM_LINES      20
 
@@ -88,7 +92,7 @@ static bool     g_ever_fetched    = false;
 static char     g_last_fetch_time[6] = "--:--";
 
 // ── Screen/navigation state ───────────────────────────────────────────────
-typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG } ScreenType;
+typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG, SCREEN_ABOUT } ScreenType;
 
 static ScreenType g_current_screen  = SCREEN_HOME;
 
@@ -149,11 +153,8 @@ static String clock_str() {
         snprintf(buf, sizeof(buf), "%02d:%02d", ti.tm_hour, ti.tm_min);
         return String(buf);
     }
-    // NTP not yet synced — count up from 12:00 as a fallback
-    int total_m = 720 + (int)(millis() / 60000);
-    char buf[6];
-    snprintf(buf, sizeof(buf), "%02d:%02d", (total_m / 60) % 24, total_m % 60);
-    return String(buf);
+    // We don't know the time
+    return String("--:--");
 }
 
 static void updated_str(char *buf, size_t n) {
@@ -168,8 +169,8 @@ static void updated_str(char *buf, size_t n) {
 static int wifi_bars() {
     if (WiFi.status() != WL_CONNECTED) return 0;
     int rssi = WiFi.RSSI();
-    if (rssi >= -60) return 3;
-    if (rssi >= -70) return 2;
+    if (rssi >= -70) return 3;
+    if (rssi >= -80) return 2;
     return 1;
 }
 
@@ -1009,6 +1010,42 @@ static void build_wifi_config(lv_obj_t *scr) {
     }, LV_EVENT_ALL, nullptr);
 }
 
+// ── About screen ──────────────────────────────────────────────────────────
+static void build_about(lv_obj_t *scr) {
+    lv_obj_t *hdr  = build_header(scr);
+    lv_obj_t *bbtn = build_back_btn(hdr);
+    lv_obj_add_event_cb(bbtn, back_to_settings, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *tlbl = lv_label_create(hdr);
+    lv_label_set_text(tlbl, "About");
+    lv_obj_set_style_text_color(tlbl, C(0xE6E8EB), 0);
+    lv_obj_set_style_text_font(tlbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(tlbl, LV_ALIGN_LEFT_MID, 44, 0);
+
+    // Red roundel bar accent
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_size(bar, 64, 6);
+    lv_obj_set_style_bg_color(bar, C(0xE32017), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 3, 0);
+    lv_obj_remove_flag(bar, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_align(bar, LV_ALIGN_CENTER, 0, -60);
+
+    lv_obj_t *app_lbl = lv_label_create(scr);
+    lv_label_set_text(app_lbl, "TubeStatus");
+    lv_obj_set_style_text_color(app_lbl, C(0xE6E8EB), 0);
+    lv_obj_set_style_text_font(app_lbl, &lv_font_montserrat_22, 0);
+    lv_obj_align(app_lbl, LV_ALIGN_CENTER, 0, -28);
+
+    lv_obj_t *powered_lbl = lv_label_create(scr);
+    lv_label_set_text(powered_lbl, "Powered by TfL Open Data");
+    lv_obj_set_style_text_color(powered_lbl, C(0x9AA3AD), 0);
+    lv_obj_set_style_text_font(powered_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(powered_lbl, LV_ALIGN_CENTER, 0, 10);
+
+}
+
 // ── Settings menu screen ──────────────────────────────────────────────────
 static void build_settings(lv_obj_t *scr) {
     lv_obj_t *hdr  = build_header(scr);
@@ -1025,9 +1062,10 @@ static void build_settings(lv_obj_t *scr) {
     static const MenuItem items[] = {
         { LV_SYMBOL_LIST, "Lines", SCREEN_SETTINGS_LINES },
         { LV_SYMBOL_WIFI, "Wi-Fi", SCREEN_WIFI_CONFIG    },
+        { FA_INFO_ICON, "About", SCREEN_ABOUT          },
     };
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         lv_obj_t *row = lv_button_create(scr);
         lv_obj_set_size(row, TFT_HOR_RES - 24, 64);
         lv_obj_set_pos(row, 12, 68 + i * 72);
@@ -1042,9 +1080,14 @@ static void build_settings(lv_obj_t *scr) {
         }, LV_EVENT_CLICKED, (void *)(uintptr_t)items[i].target);
 
         lv_obj_t *icon = lv_label_create(row);
+        
         lv_label_set_text(icon, items[i].icon);
         lv_obj_set_style_text_color(icon, C(0x9AA3AD), 0);
-        lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+        if(i==2){
+            lv_obj_set_style_text_font(icon, &lv_font_fa_extra_icons, 0);
+        }else{
+            lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+        }
         lv_obj_align(icon, LV_ALIGN_LEFT_MID, 16, 0);
         lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
 
@@ -1092,6 +1135,7 @@ static void navigate_to(ScreenType type, int line_idx) {
         case SCREEN_SETTINGS:       build_settings(new_scr);         break;
         case SCREEN_SETTINGS_LINES: build_settings_lines(new_scr);   break;
         case SCREEN_WIFI_CONFIG:    build_wifi_config(new_scr);      break;
+        case SCREEN_ABOUT:          build_about(new_scr);            break;
     }
 
     lv_scr_load(new_scr);
