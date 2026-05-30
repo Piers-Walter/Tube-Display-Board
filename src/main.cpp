@@ -623,6 +623,8 @@ static void build_detail(lv_obj_t *scr, int idx) {
 }
 
 // ── Settings screen ───────────────────────────────────────────────────────
+static void save_line_prefs();  // forward declaration
+
 static void refresh_toggle(int i) {
     bool on = line_enabled[i];
     if (g_toggle_track[i])
@@ -635,14 +637,17 @@ static void settings_row_cb(lv_event_t *e) {
     int i = (int)(uintptr_t)lv_event_get_user_data(e);
     line_enabled[i] = !line_enabled[i];
     refresh_toggle(i);
+    save_line_prefs();
 }
 
 static void settings_all_cb(lv_event_t *) {
     for (int i = 0; i < NUM_LINES; i++) { line_enabled[i] = true;  refresh_toggle(i); }
+    save_line_prefs();
 }
 
 static void settings_none_cb(lv_event_t *) {
     for (int i = 0; i < NUM_LINES; i++) { line_enabled[i] = false; refresh_toggle(i); }
+    save_line_prefs();
 }
 
 static void build_settings_lines(lv_obj_t *scr) {
@@ -776,6 +781,26 @@ static void build_settings_lines(lv_obj_t *scr) {
 }
 
 // ── WiFi credential helpers ───────────────────────────────────────────────
+static void save_line_prefs() {
+    Preferences prefs;
+    prefs.begin("lines", false);
+    uint32_t mask = 0;
+    for (int i = 0; i < NUM_LINES; i++)
+        if (line_enabled[i]) mask |= (1u << i);
+    prefs.putUInt("mask", mask);
+    prefs.end();
+}
+
+static void load_line_prefs() {
+    Preferences prefs;
+    prefs.begin("lines", true);
+    if (!prefs.isKey("mask")) { prefs.end(); return; }
+    uint32_t mask = prefs.getUInt("mask", 0xFFFFFFFF);
+    prefs.end();
+    for (int i = 0; i < NUM_LINES; i++)
+        line_enabled[i] = (mask >> i) & 1;
+}
+
 static void load_wifi_credentials() {
     Preferences prefs;
     prefs.begin("wifi", true);
@@ -1304,7 +1329,7 @@ void setup() {
 
     // App init
     for (int i = 0; i < NUM_LINES; i++) {
-        line_enabled[i] = true;
+        line_enabled[i] = true;  // default; overwritten by load_line_prefs() below
         // Default status until first fetch
         line_statuses[i].level = STATUS_GOOD;
         strncpy(line_statuses[i].headline, "Loading...", 79);
@@ -1318,6 +1343,8 @@ void setup() {
     }
 
     lv_timer_create(clock_cb, 10000, nullptr);
+
+    load_line_prefs();
 
     // Load saved WiFi credentials and start background connect
     load_wifi_credentials();

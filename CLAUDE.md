@@ -30,6 +30,13 @@ Three screens navigate via touch:
 - **PSRAM**: Draw buffer and `line_statuses[]` array allocated from PSRAM via `ps_malloc`/`ps_calloc` in `setup()`
 - **Line data**: All 20 lines (tube + DLR + overground + tram) with TfL official hex colours
 
+## Line visibility persistence
+
+Which lines are shown on the home grid is stored in NVS via the `Preferences` library (namespace `"lines"`, key `"mask"`).
+
+- `save_line_prefs()` — packs `line_enabled[]` into a 32-bit bitmask and writes it. Called immediately on any toggle change (individual row, ALL, NONE).
+- `load_line_prefs()` — reads the bitmask back and restores `line_enabled[]`. Called in `setup()` after the default all-enabled initialisation. If no key exists yet (first boot) the defaults are kept.
+
 ## WiFi credential persistence
 
 Credentials are stored in NVS via the ESP32 `Preferences` library (namespace `"wifi"`, keys `"ssid"` / `"password"`).
