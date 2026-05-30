@@ -1,6 +1,5 @@
 // TubeStatus — London Underground status board for ESP32-4848S040 (480×480 LVGL)
-// Design source: claude.ai/design
-// Network: TfL Unified API (stubbed — see fetch_tfl_status() below)
+// Network: TfL Unified API + NTP clock, WiFi credentials persisted in NVS
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -8,7 +7,11 @@
 #include <lvgl.h>
 #include "touch.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <Preferences.h>
+#include <time.h>
 
 // ── Hardware ────────────────────────────────────────────────────────────────
 #define GFX_BL         38
@@ -20,7 +23,7 @@
 
 static Arduino_ESP32SPI   *bus;
 static Arduino_RGB_Display *gfx;
-static uint32_t draw_buf[DRAW_BUF_SIZE / 4];
+static uint8_t *draw_buf = nullptr;  // PSRAM-allocated in setup()
 
 // ── Line data ────────────────────────────────────────────────────────────────
 #define NUM_LINES      20
@@ -31,15 +34,15 @@ typedef enum { STATUS_GOOD = 0, STATUS_MINOR, STATUS_SEVERE } StatusLevel;
 struct LineInfo {
     const char *id;
     const char *name;
-    const char *short_name;  // nullptr → use name
-    uint32_t    color;       // 0xRRGGBB (TfL official)
-    bool        text_dark;   // true → dark text on badge bar
+    const char *short_name;
+    uint32_t    color;
+    bool        text_dark;
 };
 
 struct StatusInfo {
-    StatusLevel  level;
-    const char  *headline;
-    const char  *detail;
+    StatusLevel level;
+    char        headline[80];
+    char        detail[320];
 };
 
 struct StatusTone {
@@ -47,8 +50,6 @@ struct StatusTone {
 };
 
 static const LineInfo LINES[NUM_LINES] = {
-    // ── Tube ────────────────────────────────────────────────────────────────
-    // API ids confirmed from TfL Unified API
     { "bakerloo",        "Bakerloo",           nullptr,   0xB36305, false },
     { "central",         "Central",            nullptr,   0xE32017, false },
     { "circle",          "Circle",             nullptr,   0xFFD300, true  },
@@ -61,9 +62,7 @@ static const LineInfo LINES[NUM_LINES] = {
     { "piccadilly",      "Piccadilly",         nullptr,   0x003688, false },
     { "victoria",        "Victoria",           nullptr,   0x0098D4, false },
     { "waterloo-city",   "Waterloo & City",    "W&C",     0x95CDBA, true  },
-    // ── Other modes ─────────────────────────────────────────────────────────]
     { "dlr",             "DLR",                nullptr,   0x009BBB, false },
-    // Overground (2024 rebrand — 6 named lines)
     { "lioness",         "Lioness",            nullptr,   0xF882B8, true  },
     { "mildmay",         "Mildmay",            nullptr,   0x0098A4, false },
     { "windrush",        "Windrush",           nullptr,   0xDB261B, false },
@@ -73,46 +72,25 @@ static const LineInfo LINES[NUM_LINES] = {
     { "tram",            "Tram",               nullptr,   0x84B817, true  },
 };
 
-// Stub data matching realistic TfL API output.
-// Wire fetch_tfl_status() below to populate these from:
-//   GET https://api.tfl.gov.uk/Line/Mode/tube,dlr,elizabeth-line,tram,overground/Status
-//   Response: [{id, lineStatuses:[{statusSeverity, statusSeverityDescription, reason}]}]
-//   Map: severity 10 → GOOD, 7/9 → MINOR, ≤6 → SEVERE
-static StatusInfo line_statuses[NUM_LINES] = {
-    // Tube
-    { STATUS_GOOD,   "Good service",   "Good service on the Bakerloo line." },
-    { STATUS_SEVERE, "Severe delays",  "Severe delays between Marble Arch and Liverpool Street due to a signal failure at Bond Street. Tickets accepted on local buses." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Circle line." },
-    { STATUS_MINOR,  "Minor delays",   "Minor delays westbound between Earl's Court and Wimbledon due to an earlier incident at Parsons Green. Service is recovering." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Elizabeth line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Hammersmith & City line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Jubilee line." },
-    { STATUS_MINOR,  "Minor delays",   "Minor delays between Aldgate and Baker Street due to train cancellations." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Northern line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Piccadilly line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Victoria line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Waterloo & City line." },
-    // Other modes
-    { STATUS_GOOD,   "Good service",   "Good service on the DLR." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Lioness line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Mildmay line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Windrush line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Weaver line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Suffragette line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Liberty line." },
-    { STATUS_GOOD,   "Good service",   "Good service on the Tram network." },
-};
+// PSRAM-allocated in setup(); populated by fetch_tfl_status()
+static StatusInfo *line_statuses = nullptr;
 
 static const StatusTone STATUS_TONES[3] = {
-    { 0x1A1F26, 0xE6E8EB, 0x39B57C }, // good  — dark bg, light text, green dot
-    { 0x5A3D14, 0xFFE3B0, 0xF2A93B }, // minor — amber bg
-    { 0x6B1721, 0xFFD9DD, 0xFF5168 }, // severe — red bg
+    { 0x1A1F26, 0xE6E8EB, 0x39B57C }, // good
+    { 0x5A3D14, 0xFFE3B0, 0xF2A93B }, // minor
+    { 0x6B1721, 0xFFD9DD, 0xFF5168 }, // severe
 };
 
 // ── App state ─────────────────────────────────────────────────────────────
-static bool line_enabled[NUM_LINES];
-static int  last_updated_min = 2;              // stub: pretend fetched 2min ago
-static char disp_names[NUM_LINES][20];         // uppercase badge labels
+static bool     line_enabled[NUM_LINES];
+static char     disp_names[NUM_LINES][20];
+static uint32_t g_last_fetch_ms = 0;
+static bool     g_ever_fetched  = false;
+
+// ── Screen/navigation state ───────────────────────────────────────────────
+typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG } ScreenType;
+
+static ScreenType g_current_screen  = SCREEN_HOME;
 
 // ── Pagination state ──────────────────────────────────────────────────────
 static int        g_home_page       = 0;
@@ -124,9 +102,7 @@ static int16_t    g_cont_start_x    = 0;
 static lv_obj_t  *g_page_dots[8]    = {};
 
 // ── UI refs ────────────────────────────────────────────────────────────────
-typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG } ScreenType;
-
-static lv_obj_t *g_time_lbl          = nullptr;  // updated by clock timer
+static lv_obj_t *g_time_lbl               = nullptr;
 static lv_obj_t *g_toggle_track[NUM_LINES] = {};
 static lv_obj_t *g_toggle_knob[NUM_LINES]  = {};
 
@@ -140,6 +116,7 @@ static lv_obj_t *g_wifi_status_lbl   = nullptr;
 
 // ── Forward declarations ────────────────────────────────────────────────
 static void navigate_to(ScreenType type, int line_idx = 0);
+static void fetch_tfl_status();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 static inline lv_color_t C(uint32_t rgb) { return lv_color_hex(rgb); }
@@ -155,12 +132,34 @@ static const lv_font_t *badge_font(int name_len, bool large) {
     return &lv_font_montserrat_10;
 }
 
+// ── NTP / Clock ───────────────────────────────────────────────────────────
+static void configure_ntp() {
+    // Europe/London: GMT winter, BST (UTC+1) last Sun Mar → last Sun Oct
+    configTzTime("GMT0BST,M3.5.0/1,M10.5.0", "pool.ntp.org", "time.google.com");
+    Serial.println("[NTP] Sync requested");
+}
+
 static String clock_str() {
-    // No RTC/NTP in stub — show time progressing from 12:00 since boot.
+    struct tm ti;
+    if (getLocalTime(&ti, 0)) {
+        char buf[6];
+        snprintf(buf, sizeof(buf), "%02d:%02d", ti.tm_hour, ti.tm_min);
+        return String(buf);
+    }
+    // NTP not yet synced — count up from 12:00 as a fallback
     int total_m = 720 + (int)(millis() / 60000);
     char buf[6];
     snprintf(buf, sizeof(buf), "%02d:%02d", (total_m / 60) % 24, total_m % 60);
     return String(buf);
+}
+
+static void updated_str(char *buf, size_t n) {
+    if (!g_ever_fetched) {
+        snprintf(buf, n, "Updating...");
+        return;
+    }
+    int mins = (int)((millis() - g_last_fetch_ms) / 60000);
+    snprintf(buf, n, "Updated %dm ago", mins);
 }
 
 static void style_screen(lv_obj_t *s) {
@@ -184,9 +183,6 @@ static void no_decor(lv_obj_t *o) {
 }
 
 // ── Badge widget ─────────────────────────────────────────────────────────
-// Ring style: hollow colored circle with a colored horizontal bar (name band).
-// The bar extends 11% beyond the circle diameter on each side.
-// Container is intentionally wider than `size` to hold the bar overhang.
 static lv_obj_t *create_badge(lv_obj_t *parent, int idx, int size) {
     const LineInfo &L   = LINES[idx];
     lv_color_t clr      = C(L.color);
@@ -201,7 +197,6 @@ static lv_obj_t *create_badge(lv_obj_t *parent, int idx, int size) {
     lv_obj_set_size(cont, cont_w, size);
     no_decor(cont);
 
-    // Hollow ring
     lv_obj_t *ring = lv_obj_create(cont);
     lv_obj_set_size(ring, size, size);
     lv_obj_align(ring, LV_ALIGN_CENTER, 0, 0);
@@ -213,7 +208,6 @@ static lv_obj_t *create_badge(lv_obj_t *parent, int idx, int size) {
     lv_obj_set_style_pad_all(ring, 0, 0);
     lv_obj_remove_flag(ring, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
 
-    // Name band — same color as ring, spans full container width
     lv_obj_t *bar = lv_obj_create(cont);
     lv_obj_set_size(bar, cont_w, bar_h);
     lv_obj_align(bar, LV_ALIGN_CENTER, 0, 0);
@@ -331,7 +325,6 @@ static void home_swipe_released_cb(lv_event_t *) {
 static void build_home(lv_obj_t *scr) {
     g_time_lbl = nullptr;
 
-    // Build full sorted list: severe → minor → good
     int all_sorted[NUM_LINES], total = 0;
     for (int pass = 2; pass >= 0; pass--) {
         for (int i = 0; i < NUM_LINES; i++) {
@@ -344,7 +337,6 @@ static void build_home(lv_obj_t *scr) {
     if (g_home_page_count < 1) g_home_page_count = 1;
     if (g_home_page >= g_home_page_count) g_home_page = g_home_page_count - 1;
 
-    // Header
     lv_obj_t *hdr = build_header(scr);
 
     g_time_lbl = lv_label_create(hdr);
@@ -353,8 +345,8 @@ static void build_home(lv_obj_t *scr) {
     lv_obj_set_style_text_font(g_time_lbl, &lv_font_montserrat_20, 0);
     lv_obj_align(g_time_lbl, LV_ALIGN_LEFT_MID, 0, 0);
 
-    char upd[24];
-    snprintf(upd, sizeof(upd), "Updated %dm ago", last_updated_min);
+    char upd[28];
+    updated_str(upd, sizeof(upd));
     lv_obj_t *upd_lbl = lv_label_create(hdr);
     lv_label_set_text(upd_lbl, upd);
     lv_obj_set_style_text_color(upd_lbl, C(0x6E7681), 0);
@@ -385,17 +377,15 @@ static void build_home(lv_obj_t *scr) {
         return;
     }
 
-    // Grid layout — always 4 cols × 3 rows, reserve 24px at bottom for dots
     static const int COLS = 4, ROWS = 3;
     static const int BADGE_SIZE = 70;
     int pad    = 12, gap = 8;
-    int grid_w = TFT_HOR_RES - 2 * pad;                             // 456
-    int grid_h = TFT_VER_RES - 56 - 2 * pad - 24;                  // 376
-    int tile_w = (grid_w - (COLS - 1) * gap) / COLS;                // 108
-    int tile_h = (grid_h - (ROWS - 1) * gap) / ROWS;                // 120
-    int badge_cont_w = BADGE_SIZE + 2 * (BADGE_SIZE * 11 / 100);    //  86
+    int grid_w = TFT_HOR_RES - 2 * pad;
+    int grid_h = TFT_VER_RES - 56 - 2 * pad - 24;
+    int tile_w = (grid_w - (COLS - 1) * gap) / COLS;
+    int tile_h = (grid_h - (ROWS - 1) * gap) / ROWS;
+    int badge_cont_w = BADGE_SIZE + 2 * (BADGE_SIZE * 11 / 100);
 
-    // Wide container spanning all pages side-by-side; slides on swipe
     g_tile_cont = lv_obj_create(scr);
     lv_obj_set_size(g_tile_cont, g_home_page_count * TFT_HOR_RES, TFT_VER_RES - 56);
     lv_obj_set_pos(g_tile_cont, -g_home_page * TFT_HOR_RES, 56);
@@ -446,12 +436,10 @@ static void build_home(lv_obj_t *scr) {
         }
     }
 
-    // Swipe on screen background (gaps between tiles)
     lv_obj_add_event_cb(scr, home_swipe_pressed_cb,  LV_EVENT_PRESSED,  nullptr);
     lv_obj_add_event_cb(scr, home_swipe_pressing_cb, LV_EVENT_PRESSING, nullptr);
     lv_obj_add_event_cb(scr, home_swipe_released_cb, LV_EVENT_RELEASED, nullptr);
 
-    // Page indicator dots (stored for live colour updates on swipe)
     memset(g_page_dots, 0, sizeof(g_page_dots));
     if (g_home_page_count > 1) {
         static const int DOT_D = 7, DOT_GAP = 6;
@@ -481,7 +469,6 @@ static void build_detail(lv_obj_t *scr, int idx) {
     const StatusInfo &st   = line_statuses[idx];
     const StatusTone &tone = STATUS_TONES[(int)st.level];
 
-    // Header
     lv_obj_t *hdr  = build_header(scr);
     lv_obj_t *bbtn = build_back_btn(hdr);
     lv_obj_add_event_cb(bbtn, back_to_home, LV_EVENT_CLICKED, nullptr);
@@ -494,7 +481,6 @@ static void build_detail(lv_obj_t *scr, int idx) {
     lv_obj_set_style_text_font(tlbl, &lv_font_montserrat_16, 0);
     lv_obj_align(tlbl, LV_ALIGN_LEFT_MID, 44, 0);
 
-    // Large badge
     static const int BADGE_SIZE = 140;
     int badge_cont_w = BADGE_SIZE + 2 * (BADGE_SIZE * 11 / 100);
     int content_y    = 76;
@@ -503,7 +489,6 @@ static void build_detail(lv_obj_t *scr, int idx) {
     lv_obj_set_pos(badge, (TFT_HOR_RES - badge_cont_w) / 2, content_y);
     content_y += BADGE_SIZE + 18;
 
-    // Status pill (flex row: dot + label)
     lv_obj_t *pill = lv_obj_create(scr);
     lv_obj_set_height(pill, 30);
     lv_obj_set_width(pill, LV_SIZE_CONTENT);
@@ -532,12 +517,10 @@ static void build_detail(lv_obj_t *scr, int idx) {
     lv_obj_set_style_text_font(plbl, &lv_font_montserrat_14, 0);
     lv_obj_remove_flag(plbl, LV_OBJ_FLAG_CLICKABLE);
 
-    // Center pill after content is added
     lv_obj_update_layout(pill);
     lv_obj_align(pill, LV_ALIGN_TOP_MID, 0, content_y);
     content_y += 42;
 
-    // Detail text
     lv_obj_t *detail = lv_label_create(scr);
     lv_label_set_text(detail, st.detail);
     lv_label_set_long_mode(detail, LV_LABEL_LONG_WRAP);
@@ -547,9 +530,8 @@ static void build_detail(lv_obj_t *scr, int idx) {
     lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(detail, LV_ALIGN_TOP_MID, 0, content_y);
 
-    // Last updated (pinned to bottom)
     char upd[32];
-    snprintf(upd, sizeof(upd), "Last updated %dm ago", last_updated_min);
+    updated_str(upd, sizeof(upd));
     lv_obj_t *ulbl = lv_label_create(scr);
     lv_label_set_text(ulbl, upd);
     lv_obj_set_style_text_color(ulbl, C(0x6E7681), 0);
@@ -583,7 +565,6 @@ static void settings_none_cb(lv_event_t *) {
 static void build_settings_lines(lv_obj_t *scr) {
     for (int i = 0; i < NUM_LINES; i++) g_toggle_track[i] = g_toggle_knob[i] = nullptr;
 
-    // Header
     lv_obj_t *hdr  = build_header(scr);
     lv_obj_t *bbtn = build_back_btn(hdr);
     lv_obj_add_event_cb(bbtn, back_to_settings, LV_EVENT_CLICKED, nullptr);
@@ -594,7 +575,6 @@ static void build_settings_lines(lv_obj_t *scr) {
     lv_obj_set_style_text_font(tlbl, &lv_font_montserrat_16, 0);
     lv_obj_align(tlbl, LV_ALIGN_LEFT_MID, 44, 0);
 
-    // Sub-header row
     lv_obj_t *sub = lv_obj_create(scr);
     lv_obj_set_size(sub, TFT_HOR_RES, 40);
     lv_obj_set_pos(sub, 0, 56);
@@ -611,12 +591,11 @@ static void build_settings_lines(lv_obj_t *scr) {
     lv_obj_set_style_text_font(show_lbl, &lv_font_montserrat_10, 0);
     lv_obj_align(show_lbl, LV_ALIGN_LEFT_MID, 0, 0);
 
-    // All / None chips — positioned from the right
     struct { const char *txt; lv_event_cb_t cb; int w; } chips[] = {
         { "NONE", settings_none_cb, 50 },
         { "ALL",  settings_all_cb,  38 },
     };
-    int chip_x = -0;  // offset from right
+    int chip_x = -0;
     for (int c = 0; c < 2; c++) {
         lv_obj_t *chip = lv_button_create(sub);
         lv_obj_set_size(chip, chips[c].w, 24);
@@ -635,7 +614,6 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_align(clbl, LV_ALIGN_CENTER, 0, 0);
     }
 
-    // Scrollable line list
     lv_obj_t *list = lv_obj_create(scr);
     lv_obj_set_pos(list, 0, 96);
     lv_obj_set_size(list, TFT_HOR_RES, TFT_VER_RES - 96);
@@ -666,7 +644,6 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(row, settings_row_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
-        // Color dot
         lv_obj_t *dot = lv_obj_create(row);
         lv_obj_set_size(dot, 28, 28);
         lv_obj_set_pos(dot, 12, (ROW_H - 28) / 2);
@@ -677,7 +654,6 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_set_style_pad_all(dot, 0, 0);
         lv_obj_remove_flag(dot, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
 
-        // Line name
         lv_obj_t *nlbl = lv_label_create(row);
         lv_label_set_text(nlbl, L.name);
         lv_obj_set_style_text_color(nlbl, C(0xE6E8EB), 0);
@@ -685,7 +661,6 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_set_pos(nlbl, 52, 10);
         lv_obj_remove_flag(nlbl, LV_OBJ_FLAG_CLICKABLE);
 
-        // Status text
         lv_obj_t *slbl = lv_label_create(row);
         lv_label_set_text(slbl, st.headline);
         lv_obj_set_style_text_color(slbl, C(tone.dot), 0);
@@ -693,7 +668,6 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_set_pos(slbl, 52, 30);
         lv_obj_remove_flag(slbl, LV_OBJ_FLAG_CLICKABLE);
 
-        // Toggle track
         lv_obj_t *track = lv_obj_create(row);
         lv_obj_set_size(track, 36, 22);
         lv_obj_set_pos(track, (TFT_HOR_RES - 24) - 36 - 12, (ROW_H - 22) / 2);
@@ -705,7 +679,6 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_remove_flag(track, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
         g_toggle_track[i] = track;
 
-        // Toggle knob
         lv_obj_t *knob = lv_obj_create(track);
         lv_obj_set_size(knob, 18, 18);
         lv_obj_set_style_radius(knob, LV_RADIUS_CIRCLE, 0);
@@ -755,7 +728,6 @@ static void wifi_connect_and_save() {
     if (g_wifi_keyboard) lv_obj_add_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
 
     if (strlen(g_wifi_ssid) == 0) {
-        Serial.println("[WiFi] Aborted: empty SSID");
         if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Enter an SSID first");
         return;
     }
@@ -763,11 +735,8 @@ static void wifi_connect_and_save() {
     if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connecting...");
     lv_timer_handler();
 
-    Serial.printf("[WiFi] Free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
-    Serial.printf("[WiFi] Status before connect: %s\n", wifi_status_str(WiFi.status()));
     WiFi.disconnect(false);
     delay(100);
-    Serial.printf("[WiFi] begin('%s')\n", g_wifi_ssid);
     WiFi.begin(g_wifi_ssid, g_wifi_password);
 
     uint32_t start = millis();
@@ -775,7 +744,7 @@ static void wifi_connect_and_save() {
     while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
         wl_status_t cur = WiFi.status();
         if (cur != last_status) {
-            Serial.printf("[WiFi] status changed: %s (+%lums)\n", wifi_status_str(cur), millis() - start);
+            Serial.printf("[WiFi] status: %s (+%lums)\n", wifi_status_str(cur), millis() - start);
             last_status = cur;
         }
         lv_timer_handler();
@@ -792,11 +761,10 @@ static void wifi_connect_and_save() {
         prefs.putString("ssid",     g_wifi_ssid);
         prefs.putString("password", g_wifi_password);
         prefs.end();
-        Serial.println("[WiFi] Credentials saved to NVS");
+        configure_ntp();
         if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connected & saved");
     } else {
         WiFi.disconnect(false);
-        Serial.println("[WiFi] Connection failed");
         if (g_wifi_status_lbl) lv_label_set_text(g_wifi_status_lbl, "Connection failed - check credentials");
     }
 }
@@ -818,18 +786,16 @@ static void build_wifi_config(lv_obj_t *scr) {
     lv_obj_set_style_text_font(tlbl, &lv_font_montserrat_16, 0);
     lv_obj_align(tlbl, LV_ALIGN_LEFT_MID, 44, 0);
 
-    // SSID label
     lv_obj_t *ssid_lbl = lv_label_create(scr);
     lv_label_set_text(ssid_lbl, "Network (SSID)");
     lv_obj_set_style_text_color(ssid_lbl, C(0x6E7681), 0);
     lv_obj_set_style_text_font(ssid_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_pos(ssid_lbl, 20, 68);
 
-    // SSID textarea
     lv_obj_t *ssid_ta = lv_textarea_create(scr);
     lv_obj_set_pos(ssid_ta, 20, 86);
     lv_textarea_set_one_line(ssid_ta, true);
-    lv_obj_set_size(ssid_ta, TFT_HOR_RES - 40, 48);  // set after one_line to override auto-height
+    lv_obj_set_size(ssid_ta, TFT_HOR_RES - 40, 48);
     lv_textarea_set_placeholder_text(ssid_ta, "Enter network name");
     lv_textarea_set_text(ssid_ta, g_wifi_ssid);
     lv_obj_set_style_bg_color(ssid_ta, C(0x14181E), 0);
@@ -843,18 +809,16 @@ static void build_wifi_config(lv_obj_t *scr) {
     lv_obj_set_style_pad_hor(ssid_ta, 12, 0);
     lv_obj_set_style_pad_ver(ssid_ta, 15, 0);
 
-    // Password label
     lv_obj_t *pwd_lbl = lv_label_create(scr);
     lv_label_set_text(pwd_lbl, "Password");
     lv_obj_set_style_text_color(pwd_lbl, C(0x6E7681), 0);
     lv_obj_set_style_text_font(pwd_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_pos(pwd_lbl, 20, 148);
 
-    // Password textarea
     lv_obj_t *pwd_ta = lv_textarea_create(scr);
     lv_obj_set_pos(pwd_ta, 20, 166);
     lv_textarea_set_one_line(pwd_ta, true);
-    lv_obj_set_size(pwd_ta, TFT_HOR_RES - 40, 48);  // set after one_line to override auto-height
+    lv_obj_set_size(pwd_ta, TFT_HOR_RES - 40, 48);
     lv_textarea_set_password_mode(pwd_ta, true);
     lv_textarea_set_placeholder_text(pwd_ta, "Enter password");
     lv_textarea_set_text(pwd_ta, g_wifi_password);
@@ -869,7 +833,6 @@ static void build_wifi_config(lv_obj_t *scr) {
     lv_obj_set_style_pad_hor(pwd_ta, 12, 0);
     lv_obj_set_style_pad_ver(pwd_ta, 15, 0);
 
-    // Save button (visible when keyboard hidden; overlapped by keyboard when typing)
     lv_obj_t *save_btn = lv_button_create(scr);
     lv_obj_set_size(save_btn, TFT_HOR_RES - 40, 48);
     lv_obj_set_pos(save_btn, 20, 230);
@@ -888,7 +851,6 @@ static void build_wifi_config(lv_obj_t *scr) {
         wifi_connect_and_save();
     }, LV_EVENT_CLICKED, nullptr);
 
-    // Connection status label — updated by wifi_connect_and_save()
     lv_obj_t *status_lbl = lv_label_create(scr);
     char init_status[80] = "";
     if (WiFi.status() == WL_CONNECTED)
@@ -903,7 +865,6 @@ static void build_wifi_config(lv_obj_t *scr) {
     lv_obj_set_style_text_align(status_lbl, LV_TEXT_ALIGN_CENTER, 0);
     g_wifi_status_lbl = status_lbl;
 
-    // Keyboard — created last so it renders on top; hidden until a field is focused
     lv_obj_t *kb = lv_keyboard_create(scr);
     lv_obj_set_size(kb, TFT_HOR_RES, 220);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
@@ -989,12 +950,12 @@ static void build_settings(lv_obj_t *scr) {
 }
 
 // ── Navigation ───────────────────────────────────────────────────────────
-// Reset page when navigating to a non-home screen so returning home lands on p0
 static void delete_scr_async(void *param) {
     lv_obj_delete((lv_obj_t *)param);
 }
 
 static void navigate_to(ScreenType type, int line_idx) {
+    g_current_screen  = type;
     g_time_lbl        = nullptr;
     g_tile_cont       = nullptr;
     g_wifi_keyboard   = nullptr;
@@ -1017,19 +978,148 @@ static void navigate_to(ScreenType type, int line_idx) {
     }
 
     lv_scr_load(new_scr);
-
-    // Defer deletion so we're safely off the old screen's call stack
     if (old_scr) lv_async_call(delete_scr_async, old_scr);
 }
 
-// ── TfL API stub ─────────────────────────────────────────────────────────
-// Replace with WiFiClient + HTTPClient + ArduinoJson to populate line_statuses[].
-// Expected JSON shape per element:
-//   {"id":"central","lineStatuses":[{"statusSeverity":10,"reason":""}]}
+// ── TfL API ───────────────────────────────────────────────────────────────
+// GET https://api.tfl.gov.uk/Line/Mode/tube,dlr,elizabeth-line,tram,overground/Status
+// severity >= 10 → GOOD, 7–9 → MINOR, ≤ 6 → SEVERE
 static void fetch_tfl_status() {
-    // TODO: WiFi connect, GET the endpoint, parse JSON, populate line_statuses[]
-    // and call navigate_to(SCREEN_HOME) to refresh.
-    last_updated_min = 0;
+    // Reconnect if needed
+    if (WiFi.status() != WL_CONNECTED) {
+        if (strlen(g_wifi_ssid) == 0) return;
+        Serial.println("[TfL] WiFi down, reconnecting...");
+        WiFi.begin(g_wifi_ssid, g_wifi_password);
+        uint32_t t = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) {
+            lv_timer_handler();
+            delay(50);
+        }
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[TfL] Reconnect failed");
+            return;
+        }
+        configure_ntp();
+    }
+
+    Serial.printf("[TfL] Fetching... free heap: %lu PSRAM: %lu\n",
+        (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+
+    // Allocate response buffer from PSRAM (128 KB — TfL full-status response is ~50–100 KB)
+    static const int BUF_SIZE = 131072;
+    char *buf = (char *)ps_malloc(BUF_SIZE);
+    if (!buf) {
+        Serial.println("[TfL] PSRAM alloc failed for response buffer");
+        return;
+    }
+
+    Serial.println("[TfL] Creating WiFiClientSecure...");
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(15);  // seconds
+
+    Serial.println("[TfL] Starting HTTP GET...");
+    HTTPClient http;
+    http.useHTTP10(true);  // HTTP/1.0: no chunked encoding, server closes connection when done
+    http.begin(client, "https://api.tfl.gov.uk/Line/Mode/tube,dlr,elizabeth-line,tram,overground/Status");
+    http.setTimeout(15000);
+    http.addHeader("Accept", "application/json");
+
+    int code = http.GET();
+    Serial.printf("[TfL] HTTP response code: %d\n", code);
+    if (code != 200) {
+        Serial.printf("[TfL] Error body: %s\n", http.getString().c_str());
+        http.end();
+        free(buf);
+        return;
+    }
+
+    int content_len = http.getSize();
+    Serial.printf("[TfL] Content-Length: %d  connected: %d\n", content_len, (int)http.connected());
+
+    // getStreamPtr() gives raw stream; safe to use with HTTP/1.0 (no chunk headers).
+    // Loop exits on TCP close (!connected) or 3 s idle after receiving data.
+    WiFiClient *stream = http.getStreamPtr();
+    int total = 0;
+    uint32_t last_data_ms = millis();
+    uint32_t deadline     = millis() + 30000;
+    while (total < BUF_SIZE - 1 && millis() < deadline) {
+        int avail = stream->available();
+        if (avail > 0) {
+            int n = stream->readBytes((uint8_t *)(buf + total),
+                                      min(avail, BUF_SIZE - 1 - total));
+            total += n;
+            last_data_ms = millis();
+        } else if (!http.connected()) {
+            Serial.printf("[TfL] Connection closed after %d bytes\n", total);
+            break;
+        } else if (total > 0 && millis() - last_data_ms > 3000) {
+            Serial.printf("[TfL] Idle 3s after %d bytes — treating as end\n", total);
+            break;
+        } else {
+            delay(5);
+        }
+    }
+    bool timed_out = (millis() >= deadline);
+    buf[total] = '\0';
+    http.end();
+    client.stop();
+
+    Serial.printf("[TfL] Read complete: %d bytes, timed_out=%d, free_heap=%lu\n",
+        total, (int)timed_out, (unsigned long)ESP.getFreeHeap());
+    if (total == 0) { free(buf); return; }
+
+    // Print first 120 chars so we can confirm it's valid JSON
+    Serial.printf("[TfL] Body start: %.120s\n", buf);
+
+    Serial.println("[TfL] Parsing JSON...");
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, buf, total);
+    free(buf);
+
+    Serial.printf("[TfL] Parse result: %s\n", err.c_str());
+    if (err) return;
+
+    int matched = 0;
+    for (JsonObject line_obj : doc.as<JsonArray>()) {
+        const char *id = line_obj["id"];
+        if (!id) continue;
+        for (int i = 0; i < NUM_LINES; i++) {
+            if (strcmp(LINES[i].id, id) != 0) continue;
+            JsonArray statuses = line_obj["lineStatuses"].as<JsonArray>();
+            if (statuses.isNull() || statuses.size() == 0) break;
+            JsonObject s0      = statuses[0];
+            int         sev    = s0["statusSeverity"]            | 10;
+            const char *desc   = s0["statusSeverityDescription"] | "Good service";
+            const char *reason = s0["reason"]                    | "";
+
+            line_statuses[i].level = (sev >= 10) ? STATUS_GOOD
+                                   : (sev >= 7)  ? STATUS_MINOR
+                                                 : STATUS_SEVERE;
+            strncpy(line_statuses[i].headline, desc, 79);
+            line_statuses[i].headline[79] = '\0';
+            const char *det = (strlen(reason) > 0) ? reason : desc;
+            strncpy(line_statuses[i].detail, det, 319);
+            line_statuses[i].detail[319] = '\0';
+            Serial.printf("[TfL]   %s → sev=%d %s\n", id, sev, desc);
+            matched++;
+            break;
+        }
+    }
+
+    g_last_fetch_ms = millis();
+    g_ever_fetched  = true;
+    Serial.printf("[TfL] Done: %d lines matched. Free heap: %lu\n",
+        matched, (unsigned long)ESP.getFreeHeap());
+
+    if (g_current_screen == SCREEN_HOME) navigate_to(SCREEN_HOME);
+}
+
+// ── Fetch timer ───────────────────────────────────────────────────────────
+static bool g_fetch_requested = false;
+
+static void fetch_timer_cb(lv_timer_t *) {
+    g_fetch_requested = true;
 }
 
 // ── LVGL platform callbacks ───────────────────────────────────────────────
@@ -1065,12 +1155,26 @@ static void clock_cb(lv_timer_t *) {
 void setup() {
     Serial.begin(115200);
 
-    // Init WiFi stack before LVGL/display allocate internal heap.
-    // ESP32-S3 WiFi needs ~130 KB of internal DRAM; claiming it first avoids OOM later.
-    Serial.printf("[WiFi] Free heap before WiFi init: %lu\n", (unsigned long)ESP.getFreeHeap());
+    // Allocate draw buffer from PSRAM before WiFi/LVGL claim internal heap
+    draw_buf = (uint8_t *)ps_malloc(DRAW_BUF_SIZE);
+    if (!draw_buf) {
+        Serial.println("[WARN] PSRAM alloc failed, falling back to DRAM for draw_buf");
+        draw_buf = (uint8_t *)malloc(DRAW_BUF_SIZE);
+    }
+
+    // Allocate status array from PSRAM (20 × ~400 bytes = ~8 KB)
+    line_statuses = (StatusInfo *)ps_calloc(NUM_LINES, sizeof(StatusInfo));
+    if (!line_statuses) {
+        Serial.println("[WARN] PSRAM alloc failed for line_statuses, using DRAM");
+        line_statuses = (StatusInfo *)calloc(NUM_LINES, sizeof(StatusInfo));
+    }
+
+    Serial.printf("[Mem] Free heap: %lu  Free PSRAM: %lu\n",
+        (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+
+    // Init WiFi early so it can claim internal DRAM before LVGL buffers
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(false);
-    Serial.printf("[WiFi] Free heap after  WiFi init: %lu\n", (unsigned long)ESP.getFreeHeap());
 
     touch_init();
 
@@ -1103,7 +1207,7 @@ void setup() {
 
     lv_display_t *disp = lv_display_create(TFT_HOR_RES, TFT_VER_RES);
     lv_display_set_flush_cb(disp, my_disp_flush);
-    lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(disp, draw_buf, nullptr, DRAW_BUF_SIZE, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_rotation(disp, TFT_ROTATION);
 
     lv_indev_t *indev = lv_indev_create();
@@ -1113,6 +1217,11 @@ void setup() {
     // App init
     for (int i = 0; i < NUM_LINES; i++) {
         line_enabled[i] = true;
+        // Default status until first fetch
+        line_statuses[i].level = STATUS_GOOD;
+        strncpy(line_statuses[i].headline, "Loading...", 79);
+        strncpy(line_statuses[i].detail,   "Fetching status from TfL...", 319);
+        // Build uppercase display name
         const char *src = LINES[i].short_name ? LINES[i].short_name : LINES[i].name;
         int j = 0;
         for (; src[j] && j < 19; j++)
@@ -1122,11 +1231,29 @@ void setup() {
 
     lv_timer_create(clock_cb, 10000, nullptr);
 
+    // Load saved WiFi credentials and start background connect
     load_wifi_credentials();
+    if (strlen(g_wifi_ssid) > 0) {
+        WiFi.begin(g_wifi_ssid, g_wifi_password);
+        Serial.printf("[WiFi] Background connect to '%s'\n", g_wifi_ssid);
+    }
+
     navigate_to(SCREEN_HOME);
+
+    // First fetch fires 8 s after boot (gives WiFi time to connect), then auto-deletes
+    lv_timer_t *once = lv_timer_create([](lv_timer_t *) {
+        g_fetch_requested = true;
+    }, 8000, nullptr);
+    lv_timer_set_repeat_count(once, 1);
+
+    // Recurring fetch every 60 s
+    lv_timer_create(fetch_timer_cb, 60000, nullptr);
 }
 
 void loop() {
+    if (g_fetch_requested) {
+        g_fetch_requested = false;
+        fetch_tfl_status();
+    }
     lv_timer_handler();
-    // delay(2);
 }
