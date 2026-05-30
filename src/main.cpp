@@ -84,8 +84,9 @@ static const StatusTone STATUS_TONES[3] = {
 // ── App state ─────────────────────────────────────────────────────────────
 static bool     line_enabled[NUM_LINES];
 static char     disp_names[NUM_LINES][20];
-static uint32_t g_last_fetch_ms = 0;
-static bool     g_ever_fetched  = false;
+static uint32_t g_last_fetch_ms   = 0;
+static bool     g_ever_fetched    = false;
+static char     g_last_fetch_time[6] = "";
 
 // ── Screen/navigation state ───────────────────────────────────────────────
 typedef enum { SCREEN_HOME, SCREEN_DETAIL, SCREEN_SETTINGS, SCREEN_SETTINGS_LINES, SCREEN_WIFI_CONFIG } ScreenType;
@@ -113,6 +114,7 @@ static lv_obj_t *g_wifi_keyboard     = nullptr;
 static lv_obj_t *g_ssid_ta           = nullptr;
 static lv_obj_t *g_pwd_ta            = nullptr;
 static lv_obj_t *g_wifi_status_lbl   = nullptr;
+static bool      g_wifi_was_connected = false;
 
 // ── Forward declarations ────────────────────────────────────────────────
 static void navigate_to(ScreenType type, int line_idx = 0);
@@ -158,8 +160,7 @@ static void updated_str(char *buf, size_t n) {
         snprintf(buf, n, "Updating...");
         return;
     }
-    int mins = (int)((millis() - g_last_fetch_ms) / 60000);
-    snprintf(buf, n, "Updated %dm ago", mins);
+    snprintf(buf, n, "Updated %s", g_last_fetch_time);
 }
 
 static void style_screen(lv_obj_t *s) {
@@ -1109,6 +1110,8 @@ static void fetch_tfl_status() {
 
     g_last_fetch_ms = millis();
     g_ever_fetched  = true;
+    strncpy(g_last_fetch_time, clock_str().c_str(), 5);
+    g_last_fetch_time[5] = '\0';
     Serial.printf("[TfL] Done: %d lines matched. Free heap: %lu\n",
         matched, (unsigned long)ESP.getFreeHeap());
 
@@ -1240,17 +1243,16 @@ void setup() {
 
     navigate_to(SCREEN_HOME);
 
-    // First fetch fires 8 s after boot (gives WiFi time to connect), then auto-deletes
-    lv_timer_t *once = lv_timer_create([](lv_timer_t *) {
-        g_fetch_requested = true;
-    }, 8000, nullptr);
-    lv_timer_set_repeat_count(once, 1);
-
-    // Recurring fetch every 60 s
+    // Recurring fetch every 60 s; first fetch is triggered in loop() on WiFi connect
     lv_timer_create(fetch_timer_cb, 60000, nullptr);
 }
 
 void loop() {
+    if (!g_wifi_was_connected && WiFi.status() == WL_CONNECTED) {
+        g_wifi_was_connected = true;
+        configure_ntp();
+        g_fetch_requested = true;
+    }
     if (g_fetch_requested) {
         g_fetch_requested = false;
         fetch_tfl_status();
