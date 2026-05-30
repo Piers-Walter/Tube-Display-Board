@@ -104,6 +104,8 @@ static lv_obj_t  *g_page_dots[8]    = {};
 
 // ── UI refs ────────────────────────────────────────────────────────────────
 static lv_obj_t *g_time_lbl               = nullptr;
+static lv_obj_t *g_wifi_icon_cont         = nullptr;
+static lv_obj_t *g_wifi_arcs[3]           = {};
 static lv_obj_t *g_toggle_track[NUM_LINES] = {};
 static lv_obj_t *g_toggle_knob[NUM_LINES]  = {};
 
@@ -161,6 +163,83 @@ static void updated_str(char *buf, size_t n) {
         return;
     }
     snprintf(buf, n, "Updated %s", g_last_fetch_time);
+}
+
+// ── WiFi icon helpers ─────────────────────────────────────────────────────
+static int wifi_bars() {
+    if (WiFi.status() != WL_CONNECTED) return 0;
+    int rssi = WiFi.RSSI();
+    if (rssi >= -60) return 3;
+    if (rssi >= -70) return 2;
+    return 1;
+}
+
+static void update_wifi_icon() {
+    if (!g_wifi_icon_cont) return;
+    int bars = wifi_bars();
+    for (int i = 0; i < 3; i++) {
+        if (!g_wifi_arcs[i]) continue;
+        uint32_t clr = (bars == 0) ? 0x5A2828        // disconnected: dim red
+                     : (i < bars)  ? 0xE6E8EB         // active bar: bright
+                                   : 0x3A4048;         // inactive bar: dim
+        lv_obj_set_style_arc_color(g_wifi_arcs[i], C(clr), LV_PART_INDICATOR);
+    }
+}
+
+// Three curved arcs (r=5,9,13) fan upward from a common origin at container bottom.
+// Arc angles 225°→315° (90° sweep through 270°=top) match the standard WiFi roundel shape.
+static void create_wifi_icon(lv_obj_t *parent) {
+    g_wifi_icon_cont = nullptr;
+    memset(g_wifi_arcs, 0, sizeof(g_wifi_arcs));
+
+    // 26×24 container; arc origin at (13,22). Arcs sweep 225°→315° so all pixels
+    // land above y=22 — no overflow, no clipping flag needed.
+    lv_obj_t *cont = lv_obj_create(parent);
+    lv_obj_set_size(cont, 26, 24);
+    lv_obj_align(cont, LV_ALIGN_LEFT_MID, 55, -4);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0);
+    lv_obj_remove_flag(cont, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+
+    // Origin dot
+    lv_obj_t *dot = lv_obj_create(cont);
+    lv_obj_set_size(dot, 4, 4);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, C(0xE6E8EB), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dot, 0, 0);
+    lv_obj_set_style_pad_all(dot, 0, 0);
+    lv_obj_set_pos(dot, 11, 18);   // center at (13,20)
+    lv_obj_remove_flag(dot, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+
+    static const int radii[3] = { 5, 9, 13 };
+    for (int i = 0; i < 3; i++) {
+        int r = radii[i];
+        lv_obj_t *arc = lv_arc_create(cont);
+        lv_obj_set_size(arc, r * 2, r * 2);
+        lv_obj_set_pos(arc, 13 - r, 22 - r);   // center arc widget at (13,22)
+
+        lv_arc_set_angles(arc, 225, 315);
+
+        // Hide background ring and knob
+        lv_obj_set_style_arc_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
+        // Indicator style
+        lv_obj_set_style_arc_width(arc, 2, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(arc, C(0xE6E8EB), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_rounded(arc, false, LV_PART_INDICATOR);
+        // Widget background transparent
+        lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(arc, 0, 0);
+        lv_obj_set_style_pad_all(arc, 0, 0);
+        lv_obj_remove_flag(arc, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+
+        g_wifi_arcs[i] = arc;
+    }
+
+    g_wifi_icon_cont = cont;
+    update_wifi_icon();
 }
 
 static void style_screen(lv_obj_t *s) {
@@ -346,6 +425,8 @@ static void build_home(lv_obj_t *scr) {
     lv_obj_set_style_text_color(g_time_lbl, C(0xE6E8EB), 0);
     lv_obj_set_style_text_font(g_time_lbl, &lv_font_montserrat_20, 0);
     lv_obj_align(g_time_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+    create_wifi_icon(hdr);
 
     char upd[28];
     updated_str(upd, sizeof(upd));
@@ -959,6 +1040,8 @@ static void delete_scr_async(void *param) {
 static void navigate_to(ScreenType type, int line_idx) {
     g_current_screen  = type;
     g_time_lbl        = nullptr;
+    g_wifi_icon_cont  = nullptr;
+    memset(g_wifi_arcs, 0, sizeof(g_wifi_arcs));
     g_tile_cont       = nullptr;
     g_wifi_keyboard   = nullptr;
     g_ssid_ta         = nullptr;
@@ -1153,6 +1236,7 @@ static uint32_t my_tick() { return millis(); }
 // ── Clock timer ───────────────────────────────────────────────────────────
 static void clock_cb(lv_timer_t *) {
     if (g_time_lbl) lv_label_set_text(g_time_lbl, clock_str().c_str());
+    update_wifi_icon();
 }
 
 // ── setup / loop ─────────────────────────────────────────────────────────
