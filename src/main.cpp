@@ -27,7 +27,6 @@ static uint8_t *draw_buf = nullptr;  // PSRAM-allocated in setup()
 
 // ── Line data ────────────────────────────────────────────────────────────────
 #define NUM_LINES      20
-#define LINES_PER_PAGE 12  // 4 cols × 3 rows
 
 typedef enum { STATUS_GOOD = 0, STATUS_MINOR, STATUS_SEVERE } StatusLevel;
 
@@ -414,7 +413,16 @@ static void build_home(lv_obj_t *scr) {
         }
     }
 
-    g_home_page_count = (total + LINES_PER_PAGE - 1) / LINES_PER_PAGE;
+    int cols, rows, badge_size;
+    if      (total <= 1) { cols = 1; rows = 1; badge_size = 160; }
+    else if (total <= 2) { cols = 1; rows = 2; badge_size = 120; }
+    else if (total <= 4) { cols = 2; rows = 2; badge_size = 120; }
+    else if (total <= 6) { cols = 3; rows = 2; badge_size = 100; }
+    else if (total <= 9) { cols = 3; rows = 3; badge_size =  80; }
+    else                 { cols = 4; rows = 3; badge_size =  70; }
+    int lines_per_page = cols * rows;
+
+    g_home_page_count = (total + lines_per_page - 1) / lines_per_page;
     if (g_home_page_count < 1) g_home_page_count = 1;
     if (g_home_page >= g_home_page_count) g_home_page = g_home_page_count - 1;
 
@@ -460,14 +468,12 @@ static void build_home(lv_obj_t *scr) {
         return;
     }
 
-    static const int COLS = 4, ROWS = 3;
-    static const int BADGE_SIZE = 70;
     int pad    = 12, gap = 8;
     int grid_w = TFT_HOR_RES - 2 * pad;
     int grid_h = TFT_VER_RES - 56 - 2 * pad - 24;
-    int tile_w = (grid_w - (COLS - 1) * gap) / COLS;
-    int tile_h = (grid_h - (ROWS - 1) * gap) / ROWS;
-    int badge_cont_w = BADGE_SIZE + 2 * (BADGE_SIZE * 11 / 100);
+    int tile_w = (grid_w - (cols - 1) * gap) / cols;
+    int tile_h = (grid_h - (rows - 1) * gap) / rows;
+    int badge_cont_w = badge_size + 2 * (badge_size * 11 / 100);
 
     g_tile_cont = lv_obj_create(scr);
     lv_obj_set_size(g_tile_cont, g_home_page_count * TFT_HOR_RES, TFT_VER_RES - 56);
@@ -475,15 +481,15 @@ static void build_home(lv_obj_t *scr) {
     no_decor(g_tile_cont);
 
     for (int pg = 0; pg < g_home_page_count; pg++) {
-        int ps = pg * LINES_PER_PAGE;
-        int pe = ps + LINES_PER_PAGE;
+        int ps = pg * lines_per_page;
+        int pe = ps + lines_per_page;
         if (pe > total) pe = total;
         for (int t = 0; t < pe - ps; t++) {
             int idx                = all_sorted[ps + t];
             const StatusInfo &st   = line_statuses[idx];
             const StatusTone &tone = STATUS_TONES[(int)st.level];
-            int col = t % COLS;
-            int row = t / COLS;
+            int col = t % cols;
+            int row = t / cols;
             int tx  = pg * TFT_HOR_RES + pad + col * (tile_w + gap);
             int ty  = pad + row * (tile_h + gap);
 
@@ -503,10 +509,10 @@ static void build_home(lv_obj_t *scr) {
 
             bool has_status_text = (st.level != STATUS_GOOD);
             int text_reserve = has_status_text ? 26 : 14;
-            int badge_top    = (tile_h - text_reserve) / 2 - BADGE_SIZE / 2;
+            int badge_top    = (tile_h - text_reserve) / 2 - badge_size / 2;
             if (badge_top < 6) badge_top = 6;
 
-            lv_obj_t *badge = create_badge(tile, idx, BADGE_SIZE);
+            lv_obj_t *badge = create_badge(tile, idx, badge_size);
             lv_obj_set_pos(badge, (tile_w - badge_cont_w) / 2, badge_top);
 
             if (has_status_text) {
@@ -688,12 +694,13 @@ static void build_settings_lines(lv_obj_t *scr) {
         lv_obj_t *chip = lv_button_create(sub);
         lv_obj_set_size(chip, chips[c].w, 24);
         lv_obj_align(chip, LV_ALIGN_RIGHT_MID, chip_x, 0);
-        chip_x -= chips[c].w + 6;
+        chip_x -= chips[c].w + 16;
         lv_obj_set_style_bg_color(chip, C(0x1A1F26), 0);
         lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(chip, 0, 0);
         lv_obj_set_style_radius(chip, 7, 0);
         lv_obj_set_style_pad_all(chip, 0, 0);
+        lv_obj_set_ext_click_area(chip, 16);
         lv_obj_add_event_cb(chip, chips[c].cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *clbl = lv_label_create(chip);
         lv_label_set_text(clbl, chips[c].txt);
@@ -1355,8 +1362,8 @@ void setup() {
 
     navigate_to(SCREEN_HOME);
 
-    // Recurring fetch every 60 s; first fetch is triggered in loop() on WiFi connect
-    lv_timer_create(fetch_timer_cb, 60000, nullptr);
+    // Recurring fetch every 30 s; first fetch is triggered in loop() on WiFi connect
+    lv_timer_create(fetch_timer_cb, 30000, nullptr);
 }
 
 void loop() {

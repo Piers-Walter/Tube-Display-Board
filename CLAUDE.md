@@ -17,7 +17,7 @@ Three screens navigate via touch:
 
 | Screen | Description |
 |--------|-------------|
-| **Home** | 4×3 grid of 12 tiles per page, sorted severe → minor → good. Swipe left/right to page through all 20 lines. Page dots at bottom when multi-page. Header shows clock + last-updated. |
+| **Home** | Dynamic grid sorted severe → minor → good. Layout chosen by enabled-line count: 1→1×1, 2→1×2, 3–4→2×2, 5–6→3×2, 7–9→3×3, 10+→4×3 (with paging). Badge size scales with layout (70–160 px). Page dots at bottom when multi-page. Header shows clock + last-updated. |
 | **Detail** | Large roundel badge, status pill, full disruption text for a single line. |
 | **Settings** | Toggle which lines appear on the home grid. All/None shortcuts. |
 
