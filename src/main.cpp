@@ -459,6 +459,53 @@ static void build_home(lv_obj_t *scr) {
     lv_obj_set_style_text_color(sico, C(0x9AA3AD), 0);
     lv_obj_align(sico, LV_ALIGN_CENTER, 0, 0);
 
+    if (strlen(g_wifi_ssid) == 0) {
+        lv_obj_t *card = lv_obj_create(scr);
+        lv_obj_set_size(card, 360, 240);
+        lv_obj_align(card, LV_ALIGN_CENTER, 0, 16);
+        lv_obj_set_style_bg_color(card, C(0x141820), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(card, C(0x2A3040), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_border_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(card, 16, 0);
+        lv_obj_set_style_pad_all(card, 24, 0);
+        lv_obj_remove_flag(card, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(card, 16, 0);
+
+        lv_obj_t *icon_lbl = lv_label_create(card);
+        lv_label_set_text(icon_lbl, LV_SYMBOL_WIFI);
+        lv_obj_set_style_text_color(icon_lbl, C(0x5A6470), 0);
+        lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_48, 0);
+
+        lv_obj_t *title = lv_label_create(card);
+        lv_label_set_text(title, "No Wi-Fi configured");
+        lv_obj_set_style_text_color(title, C(0xE6E8EB), 0);
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+
+        lv_obj_t *sub = lv_label_create(card);
+        lv_label_set_text(sub, "Connect to fetch live tube status");
+        lv_obj_set_style_text_color(sub, C(0x6E7681), 0);
+        lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+
+        lv_obj_t *btn = lv_button_create(card);
+        lv_obj_set_size(btn, 280, 52);
+        lv_obj_set_style_bg_color(btn, C(0x1A6FD4), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_radius(btn, 12, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_add_event_cb(btn, [](lv_event_t *) { navigate_to(SCREEN_WIFI_CONFIG); }, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *btn_lbl = lv_label_create(btn);
+        lv_label_set_text(btn_lbl, "Set up Wi-Fi");
+        lv_obj_set_style_text_color(btn_lbl, C(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(btn_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_align(btn_lbl, LV_ALIGN_CENTER, 0, 0);
+        return;
+    }
+
     if (total == 0) {
         lv_obj_t *empty = lv_label_create(scr);
         lv_label_set_text(empty, "No lines selected.\nTap " LV_SYMBOL_SETTINGS " to configure.");
